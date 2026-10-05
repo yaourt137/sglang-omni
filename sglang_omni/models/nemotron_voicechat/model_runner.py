@@ -99,18 +99,16 @@ class NemotronVoiceChatModelRunner(ModelRunner):
             pass
         else:
             request_count = len(scheduler_output.requests)
-            host_token_ids = torch.stack(
-                (
-                    batch_result.next_token_ids[:request_count],
-                    self.model.function_ids[:request_count],
-                )
-            ).cpu()
-            self.stage_token_ids(batch_result, host_token_ids[0])
+            host_text_ids = batch_result.next_token_ids[:request_count].to(
+                device="cpu", copy=True
+            )
+            host_function_ids = self.model.function_ids[:request_count].tolist()
+            self.stage_token_ids(batch_result, host_text_ids)
             skipped_request_ids = (skip_rids or set()) | self.finalize_skip_rids(
                 scheduler_output
             )
             for request, function_id in zip(
-                scheduler_output.requests, host_token_ids[1].tolist()
+                scheduler_output.requests, host_function_ids
             ):
                 if request.request_id in skipped_request_ids:
                     continue

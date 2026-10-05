@@ -10,6 +10,7 @@ from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceCha
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
+from sglang_omni.scheduling.types import RequestOutput
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +73,12 @@ def build_thinker_request(
         pass
     num_frames = NemotronVoiceChatState.from_dict(payload.data).num_frames
     opening = [*prompt_token_ids, pad_token_id]
-    data = ar_request(
+    return ar_request(
         payload,
         input_ids=opening,
         max_new_tokens=num_frames,
         vocab_size=vocab_size,
     )
-    data.pending_stream_tokens = []
-    return data
 
 
 def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
@@ -91,22 +90,20 @@ def apply_thinker_result(data: SGLangARRequestData) -> StagePayload:
 
 
 def thinker_stream_output_builder(
-    request_id: str, data: SGLangARRequestData, req_output
+    request_id: str,
+    request_data: SGLangARRequestData,
+    request_output: RequestOutput,
 ) -> list[OutgoingMessage]:
-    del req_output
-    tokens = data.pending_stream_tokens
-    data.pending_stream_tokens = []
-    # The stages run in separate processes, and the relay between them moves
-    # tensors; a bare int never reaches the other side.
+    """Send the sampled token through the scheduler's stream callback."""
+    assert isinstance(request_output.data, int)
     return [
         OutgoingMessage(
             request_id=request_id,
             type="stream",
-            data=torch.tensor([int(token)], dtype=torch.long),
+            data=torch.tensor([request_output.data], dtype=torch.long),
             target="talker",
             metadata={"modality": "text_token"},
         )
-        for token in tokens
     ]
 
 

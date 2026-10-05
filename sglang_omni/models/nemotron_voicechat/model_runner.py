@@ -1,6 +1,11 @@
+"""Prepare fused inputs and collect VoiceChat Thinker outputs."""
+
 from __future__ import annotations
 
 import torch
+from sglang.srt.managers.schedule_batch import ScheduleBatch
+from sglang.srt.managers.scheduler import GenerationBatchResult
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.prefill_inputs import (
@@ -8,6 +13,7 @@ from sglang_omni.model_runner.prefill_inputs import (
     attach_omni_prefill_inputs,
 )
 from sglang_omni.models.nemotron_voicechat.payload_types import NemotronVoiceChatState
+from sglang_omni.scheduling.types import ModelRunnerOutput, SchedulerOutput
 
 
 class NemotronVoiceChatModelRunner(ModelRunner):
@@ -77,28 +83,45 @@ class NemotronVoiceChatModelRunner(ModelRunner):
         acoustic = self.acoustic_row(data, frame_index).to(device=device, dtype=dtype)
         return self.model.fusion(acoustic, text, function)
 
-    def record_function_ids(self, requests) -> None:
-        sampled = self.model.function_ids[: len(requests)].tolist()
-        for request, token in zip(requests, sampled):
-            request.data.extra_model_outputs.setdefault("function_ids", []).append(
-                token
+    def lookahead_eligible(self, batch: ScheduleBatch) -> bool:
+        """Fusion needs the previous step's committed text and function IDs."""
+        return False
+
+    def finalize(
+        self,
+        batch_result: GenerationBatchResult,
+        forward_batch: ForwardBatch | None,
+        schedule_batch: ScheduleBatch,
+        scheduler_output: SchedulerOutput,
+        skip_rids: set[str] | None = None,
+    ) -> ModelRunnerOutput:
+        if schedule_batch.is_prefill_only:
+            pass
+        else:
+            request_count = len(scheduler_output.requests)
+            host_token_ids = torch.stack(
+                (
+                    batch_result.next_token_ids[:request_count],
+                    self.model.function_ids[:request_count],
+                )
+            ).cpu()
+            self.stage_token_ids(batch_result, host_token_ids[0])
+            skipped_request_ids = (skip_rids or set()) | self.finalize_skip_rids(
+                scheduler_output
             )
-
-    @staticmethod
-    def record_stream_tokens(result, requests) -> None:
-        # Sampling has not happened yet in the post hooks; the thinker decodes
-        # greedily, so the argmax IS the token the sampler will record.
-        logits = result.logits_output.next_token_logits
-        sampled = logits[: len(requests)].argmax(dim=-1).tolist()
-        for request, token in zip(requests, sampled):
-            request.data.pending_stream_tokens.append(int(token))
-
-    def post_prefill(self, result, forward_batch, schedule_batch, requests) -> None:
-        del forward_batch, schedule_batch
-        self.record_function_ids(requests)
-        self.record_stream_tokens(result, requests)
-
-    def post_decode(self, result, forward_batch, schedule_batch, requests) -> None:
-        del forward_batch, schedule_batch
-        self.record_function_ids(requests)
-        self.record_stream_tokens(result, requests)
+            for request, function_id in zip(
+                scheduler_output.requests, host_token_ids[1].tolist()
+            ):
+                if request.request_id in skipped_request_ids:
+                    continue
+                else:
+                    request.data.extra_model_outputs.setdefault(
+                        "function_ids", []
+                    ).append(function_id)
+        return super().finalize(
+            batch_result,
+            forward_batch,
+            schedule_batch,
+            scheduler_output,
+            skip_rids=skip_rids,
+        )

@@ -6,7 +6,7 @@ Every step is a subcommand of `python -m benchmarks.duplex.fdb`; the code lives 
 
 ## What is Measured
 
-The benchmark has two datasets that test different things. v1.0 plays a user turn and asks whether the model takes or holds the turn while the user is speaking: it should stay quiet through a pause, come in when the turn ends, yield to an interruption, and not treat a backchannel as a turn. v1.5 plays a user query and then speech that overlaps the model's answer, and asks what the model does with that overlap. One run can take samples from both; each dataset has its own selection options and its own result table, and the two are never pooled.
+The benchmark has two datasets that test different things. v1.0 asks when the model should take the turn and when it should hold it: stay quiet through a pause in the user's turn, come in once the turn ends, stop and answer when the user interrupts, keep going when the user only backchannels. v1.5 plays a user query and then speech that overlaps the model's answer, and asks what the model does with that overlap. One run can take samples from both; each dataset has its own selection options and its own result table, and the two are never pooled.
 
 ### v1.0
 
@@ -20,7 +20,7 @@ v1.0 has 727 samples in five subsets. Each sample is one input audio file with a
 | `synthetic_user_interruption` | 200 | User interruption | Synthetic | Takeover rate (higher), latency (lower), relevance 0-5 (higher) |
 | `icc_backchannel` | 55 | Backchannel | ICC conversations | Takeover rate (lower), backchannel frequency, timing JSD to human backchannels (lower) |
 
-The numbers come from the official evaluator at the pinned revision, run unchanged on the fixed observation window of each session. **Takeover rate** is the share of samples whose output transcript qualifies as a turn (the evaluator's rule: a span of at least 1 s, or more than 3 words). **Latency** is the time from the annotated end of the user's turn to the model's first word, averaged over the samples that took the turn; an earlier start counts as 0. **Relevance** is a 0-5 rating of the model's reply to the interruption, from the judge selected in [Hardware and judge](#hardware-and-judge). **Backchannel frequency** and **JSD** compare the model's short acknowledgments with the human ones in timing and rate. Capture, VAD and judge versions can differ from the paper, so the rows are comparable between runs here, not with published rows.
+The numbers come from the official evaluator at the pinned revision, run unchanged on the fixed observation window of each session. **Takeover rate** is the share of samples whose output transcript qualifies as a turn (the evaluator's rule: a span of at least 1 s, or more than 3 words). **Latency** is the time from the annotated end of the user's turn to the model's first word, averaged over the samples that took the turn; an earlier start counts as 0. **Relevance** is a 0-5 rating of the model's reply to the interruption, from the judge selected in [Hardware and judge](#hardware-and-judge). **Backchannel frequency** and **JSD** compare the model's short acknowledgments with the human ones in rate and in timing. Capture, VAD and judge versions can differ from the paper, so the rows are comparable between runs here, not with published rows.
 
 ### v1.5
 
@@ -53,7 +53,7 @@ Two judges are supported, selected by `JUDGE`:
 
 | `JUDGE` | Model | Notes |
 |---|---|---|
-| `qwen` (default) | [Qwen3.8-27B](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B), served locally by SGLang | v1.5 behavior labels: non-thinking, greedy, seeds 1-3. Semantic judge: thinking, temperature 0, seed 1. v1.0 interruption relevance: non-thinking, the official prompt, non-official |
+| `qwen` (default) | [Qwen3.8-27B](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B), served locally by SGLang | v1.5 behavior labels: non-thinking, greedy, seeds 1-3. Semantic judge: thinking, temperature 0, seed 1. v1.0 interruption relevance: non-thinking, seed 0, the official prompt |
 | `gpt` | `gpt-4o-2024-08-06` for v1.5; `gpt-4-turbo` for v1.0 relevance, as the official evaluator requests | The paper's judges. Needs `OPENAI_API_KEY`. |
 
 The semantic judge uses the frozen prompt, response schema and six control cases in `benchmarks/duplex/semantic/`. Before grading, every run sends the six controls and stops if any of the 18 axis statuses differs from `control-expected.json`. Passing the controls is a rubric check, not a measure of judge accuracy.
@@ -67,7 +67,7 @@ cd <path/to/sglang-omni>
 python -m benchmarks.duplex.fdb setup
 ```
 
-`setup` needs `git`, `uv` and FFmpeg shared libraries (version 4 to 8) on the host. It is safe to rerun and skips finished steps. It first installs the `minicpm-o` extra of sglang-omni (`onnx` and `einops`, which the MiniCPM-o server imports) into the active venv, leaving every other package unchanged. Everything else goes under `FDB_WORK` (default `$HOME/fdb`):
+`setup` needs `git`, `uv` and FFmpeg shared libraries (version 4 to 8; the v1.0 backchannel evaluator reads audio through torchcodec, which loads them) on the host. It is safe to rerun and skips finished steps. It first installs the `minicpm-o` extra of sglang-omni (`onnx` and `einops`, which the MiniCPM-o server imports) into the active venv, leaving every other package unchanged. Everything else goes under `FDB_WORK` (default `$HOME/fdb`):
 
 | Path | Content |
 |---|---|
@@ -107,7 +107,7 @@ python -m benchmarks.duplex.fdb aggregate --run-name minicpmo-48
 
 ### Choosing samples
 
-Only `generate` selects samples; `asr` and `judge` score whatever that repeat recorded. Selection is deterministic, never random, and the same for both datasets: each subset takes its first N samples in numeric sample-ID order (1, 2, …, 10, 11, …), so every run and repeat with the same options evaluates the same samples, and a smaller N is always a prefix of a larger one. For v1.5 a sample is a pair (two sessions); the categories hold 200 (`user_interruption`), 98 (`user_backchannel`), 100 (`talking_to_other`) and 100 (`background_speech`) pairs. For v1.0 a sample is one session; the subset sizes are in the table above.
+Only `generate` selects samples; `asr` and `judge` score whatever that repeat recorded. Selection is deterministic, never random, and the same for both datasets: each subset (v1.5 calls them categories) takes its first N samples in numeric sample-ID order (1, 2, …, 10, 11, …), so every run and repeat with the same options evaluates the same samples, and a smaller N is always a prefix of a larger one. For v1.5 a sample is a pair (two sessions); the categories hold 200 (`user_interruption`), 98 (`user_backchannel`), 100 (`talking_to_other`) and 100 (`background_speech`) pairs. For v1.0 a sample is one session; the subset sizes are in the table above.
 
 The options come in two sets, `--v15-*` for v1.5 and `--v10-*` for v1.0, and both default to 12 per subset. A count of `0` leaves that dataset out of the run; leaving both out is an error.
 
@@ -146,10 +146,10 @@ Approximate wall time per repeat on H200, with one session at a time. Each `gene
 |---|---|---|---|
 | 48 v1.5 pairs | ~25 min | ~1 min | ~6 min |
 | 498 v1.5 pairs | ~4 h | ~10 min | ~45 min |
-| 60 v1.0 samples | ~25 min | ~1 min | ~1 min |
-| 727 v1.0 samples | ~5 h | ~5 min | ~5 min |
+| 60 v1.0 samples | ~15 min | ~1 min | ~1 min |
+| 727 v1.0 samples | ~3.5 h | ~5 min | ~5 min |
 
-Sessions run in real time (about 15 s per v1.5 session, up to about 45 s per Candor v1.0 sample), so generation dominates. Most of a v1.5 `judge` is the semantic judge: thinking-mode batches of up to 8 pairs take about 5 minutes each, and 8 batches run concurrently. `generate --num-shards 2` roughly halves generation; read the note on `--num-shards` before using it.
+Sessions run in real time (about 15 s per v1.5 session, about 12 s per v1.0 sample on average and up to about 45 s for Candor), so generation dominates. Most of a v1.5 `judge` is the semantic judge: thinking-mode batches of up to 8 pairs take about 5 minutes each, and 8 batches run concurrently. `generate --num-shards 2` roughly halves generation; read the note on `--num-shards` before using it.
 
 ## Results
 

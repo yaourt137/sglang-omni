@@ -19,7 +19,7 @@ from benchmarks.duplex.fdb.common import (
     NCCL_PORT_END,
     load_settings,
 )
-from benchmarks.duplex.fdb_v15.servers import model_server_command
+from benchmarks.duplex.fdb.servers import model_server_command
 from sglang_omni.cli import app
 from sglang_omni.models.minicpm_o.config import MiniCPMOSpeechPipelineConfig
 from sglang_omni.models.minicpm_o.native_config import MiniCPMODuplexPipelineConfig

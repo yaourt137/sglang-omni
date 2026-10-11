@@ -12,7 +12,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     ENGINE_LABEL,
     MODEL_ID,
     RECORD_PROFILE,
@@ -23,8 +23,9 @@ from benchmarks.duplex.fdb_v15.common import (
     log_tail,
     run_command,
 )
-from benchmarks.duplex.fdb_v15.selection import (
+from benchmarks.duplex.fdb.selection import (
     SampleSelection,
+    both_left_out_error,
     check_matches_other_repeats,
     describe,
     ids_text,
@@ -32,7 +33,7 @@ from benchmarks.duplex.fdb_v15.selection import (
     select_samples,
     select_v10_samples,
 )
-from benchmarks.duplex.fdb_v15.servers import model_server
+from benchmarks.duplex.fdb.servers import model_server
 from benchmarks.duplex.run_artifacts import accounting, load_run
 from benchmarks.duplex.v10_dataset import SUBSETS as V10_SUBSETS
 
@@ -219,37 +220,44 @@ def generate(
     num_shards: int,
 ) -> None:
     repeat_dir = settings.repeat_dir(repeat)
-    if (repeat_dir / "recording").exists():
+    v10_dir = repeat_dir / V10_DIR
+    if (repeat_dir / "recording").exists() or (v10_dir / "recording").exists():
         raise SystemExit(
-            f"ERROR: {repeat_dir / 'recording'} exists. "
+            f"ERROR: {repeat_dir} already holds a recording. "
             f"Use a new --repeat, or delete {repeat_dir} to redo it."
         )
-    elif (repeat_dir / V10_DIR).exists():
+    elif v10_dir.exists():
         # note (luojiaxuan): without a recording, a v10/ directory is the marker
         # of an attempt that stopped before the server came up; this attempt's
         # own selection decides whether the repeat has a v1.0 half.
-        shutil.rmtree(repeat_dir / V10_DIR)
+        shutil.rmtree(v10_dir)
     else:
         pass
     sample_ids = select_samples(settings.dataset, selection)
     v10_sample_ids = select_v10_samples(settings.dataset_v10, v10_selection)
+    if not sample_ids and not v10_sample_ids:
+        raise both_left_out_error()
+    else:
+        pass
     v10_hint = leave_out_hint(v10_selection)
     check_matches_other_repeats(repeat_dir, sample_ids, v10_sample_ids, v10_hint)
     if v10_sample_ids and not settings.dataset_v10_revision_file.is_file():
         raise SystemExit(
             f"ERROR: {settings.dataset_v10_revision_file} is missing. Run "
-            f"`python -m benchmarks.duplex.fdb_v15 setup` again, or {v10_hint}."
+            f"`python -m benchmarks.duplex.fdb setup` again, or {v10_hint}."
         )
     else:
         pass
     # note (luojiaxuan): both recorder commands read pinned inputs; resolving
     # them here fails before a single session is recorded.
-    record = v15_record_command(settings)
+    record = v15_record_command(settings) if sample_ids else []
     v10_record = v10_record_command(settings) if v10_sample_ids else []
     (repeat_dir / "logs").mkdir(parents=True, exist_ok=True)
     (repeat_dir / "sample-ids.txt").write_text(ids_text(sample_ids))
-    log(f"== Selected {len(sample_ids)} pairs: {describe(sample_ids)}")
-    v10_dir = repeat_dir / V10_DIR
+    if sample_ids:
+        log(f"== Selected {len(sample_ids)} v1.5 pairs: {describe(sample_ids)}")
+    else:
+        log("== v1.5 left out")
     if v10_sample_ids:
         (v10_dir / "logs").mkdir(parents=True, exist_ok=True)
         (v10_dir / "sample-ids.txt").write_text(ids_text(v10_sample_ids))
@@ -260,12 +268,17 @@ def generate(
     else:
         pass
     with model_server(settings, repeat_dir / "logs" / "model-server.log"):
-        (repeat_dir / "recording").mkdir()
-        log(
-            f"== Recording {len(sample_ids)} pairs ({2 * len(sample_ids)} sessions) "
-            f"in {num_shards} shard(s) -> {repeat_dir}"
-        )
-        shard_dirs = record_shards(record, repeat_dir, sample_ids, 2, num_shards)
+        shard_dirs = []
+        if sample_ids:
+            (repeat_dir / "recording").mkdir()
+            log(
+                f"== Recording {len(sample_ids)} v1.5 pairs "
+                f"({2 * len(sample_ids)} sessions) in {num_shards} shard(s) "
+                f"-> {repeat_dir}"
+            )
+            shard_dirs = record_shards(record, repeat_dir, sample_ids, 2, num_shards)
+        else:
+            pass
         v10_shard_dirs = []
         if v10_sample_ids:
             (v10_dir / "recording").mkdir()
@@ -280,11 +293,14 @@ def generate(
             pass
     for shard_dir in shard_dirs:
         print_variant_status(repeat_dir, shard_dir)
-    export_reference_audio(settings, repeat_dir, shard_dirs, sample_ids)
+    if shard_dirs:
+        export_reference_audio(settings, repeat_dir, shard_dirs, sample_ids)
+    else:
+        pass
     for shard_dir in v10_shard_dirs:
         print_variant_status(v10_dir, shard_dir)
     if v10_shard_dirs:
         export_v10_reference(settings, v10_dir, v10_shard_dirs)
     else:
         pass
-    log(f"Step 1 done: {repeat_dir / 'reference-audio'}")
+    log(f"Step 1 done: {repeat_dir}")

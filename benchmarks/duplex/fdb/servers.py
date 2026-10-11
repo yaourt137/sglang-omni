@@ -15,7 +15,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from benchmarks.benchmarker.utils import start_server_from_cmd, stop_server
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     JUDGE_MODEL_ID,
     JUDGE_SERVED_MODEL,
     Settings,

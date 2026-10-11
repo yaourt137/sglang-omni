@@ -15,7 +15,7 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download, model_info, snapshot_download
 from packaging.requirements import Requirement
 
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     FDB_SOURCE_REVISION,
     FDB_SOURCE_URL,
     JUDGE_MODEL_ID,

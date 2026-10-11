@@ -1,24 +1,30 @@
 # Full-Duplex-Bench runbook
 
-This page runs [Full-Duplex-Bench](https://github.com/DanielLin94144/Full-Duplex-Bench) v1.5 and v1.0 against a native full-duplex model served by SGLang-Omni (MiniCPM-o 4.5 by default).
+This page runs [Full-Duplex-Bench](https://github.com/DanielLin94144/Full-Duplex-Bench) v1.0 and v1.5 against a native full-duplex model served by SGLang-Omni (MiniCPM-o 4.5 by default).
 
-Every step is a subcommand of `python -m benchmarks.duplex.fdb_v15`; the code lives in `benchmarks/duplex/fdb_v15/`.
-
-v1.5 is the primary set. v1.0 is registered as a second dataset: every step handles it next to v1.5, `--v10-per-subset` chooses how many of its samples a run takes, and its numbers go in their own table. The v1.0 tasks, numbers and manual commands are in [Full-Duplex-Bench v1.0](#full-duplex-bench-v10).
+Every step is a subcommand of `python -m benchmarks.duplex.fdb`; the code lives in `benchmarks/duplex/fdb/`.
 
 ## What is Measured
 
+The benchmark has two datasets that test different things. v1.0 plays a user turn and asks whether the model takes or holds the turn while the user is speaking: it should stay quiet through a pause, come in when the turn ends, yield to an interruption, and not treat a backchannel as a turn. v1.5 plays a user query and then speech that overlaps the model's answer, and asks what the model does with that overlap. One run can take samples from both; each dataset has its own selection options and its own result table, and the two are never pooled.
+
+### v1.0
+
+v1.0 has 727 samples in five subsets. Each sample is one input audio file with an annotation (the pause positions, the end of the user's turn, the interruption, or the human backchannel timing), and is streamed in one session:
+
+| Subset | Samples | Task | Source | Reported numbers |
+|---|---:|---|---|---|
+| `synthetic_pause_handling` | 137 | Pause handling | Synthetic | Takeover rate (lower is better) |
+| `candor_pause_handling` | 216 | Pause handling | Candor conversations | Takeover rate (lower is better) |
+| `candor_turn_taking` | 119 | Smooth turn-taking | Candor conversations | Takeover rate (higher), latency (lower) |
+| `synthetic_user_interruption` | 200 | User interruption | Synthetic | Takeover rate (higher), latency (lower), relevance 0-5 (higher) |
+| `icc_backchannel` | 55 | Backchannel | ICC conversations | Takeover rate (lower), backchannel frequency, timing JSD to human backchannels (lower) |
+
+The numbers come from the official evaluator at the pinned revision, run unchanged on the fixed observation window of each session. **Takeover rate** is the share of samples whose output transcript qualifies as a turn (the evaluator's rule: a span of at least 1 s, or more than 3 words). **Latency** is the time from the annotated end of the user's turn to the model's first word, averaged over the samples that took the turn; an earlier start counts as 0. **Relevance** is a 0-5 rating of the model's reply to the interruption, from the judge selected in [Hardware and judge](#hardware-and-judge). **Backchannel frequency** and **JSD** compare the model's short acknowledgments with the human ones in timing and rate. Capture, VAD and judge versions can differ from the paper, so the rows are comparable between runs here, not with published rows.
+
+### v1.5
+
 v1.5 has 498 sample pairs in four categories: `user_interruption` (200), `user_backchannel` (98), `talking_to_other` (100) and `background_speech` (100). Each pair contains two input audio files with the same initial user query. `input.wav` also includes a later speech event intended to overlap with the model's answer: an interruption, a backchannel, speech directed at someone else, or background speech. `clean_input.wav` contains the initial query without that later event. Each file is streamed in a separate session, and the model's output audio is recorded separately.
-
-The pipeline has three steps:
-
-| Step | Subcommand | What it does |
-|---|---|---|
-| 1. Generate | `generate` | Starts the model server, streams every input to `/v1/realtime`, records the model's audio, then the selected v1.0 samples (one session each), stops the server, then cuts a fixed observation window per session |
-| 2. ASR | `asr` | Transcribes the input and output audio with word timestamps (Parakeet), computes VAD speech intervals with the official timing code, then transcribes the v1.0 outputs with the pinned v1.0 ASR script |
-| 3. Judge | `judge` | Starts the judge server, sends the four transcripts of each pair to an LLM with the official prompt, runs the semantic A/F/U judge (Qwen only), runs the pinned v1.0 evaluators one subset at a time (with `JUDGE=qwen` the interruption relevance requests go to the same local judge; with `JUDGE=gpt` they go to OpenAI's `gpt-4-turbo`, as the pinned evaluator requests), stops the server, then writes `summary.json` and `report.txt` |
-
-Every step takes `--run-name` and `--repeat`. A run is one fixed set of pairs under `$FDB_WORK/runs/RUN_NAME`. `--repeat N` does not run the benchmark N times, and it does not mean "repeat three times." One command runs once. The value is only a string inserted into the output path, `$FDB_WORK/runs/RUN_NAME/repeat-N/`, so you can tell that invocation apart from another invocation of the same run. The default is `--repeat 1`, which writes `repeat-1/`. `--repeat 3` still runs once, and it writes `repeat-3/`. To measure variance, invoke the three steps again yourself with a different N (`--repeat 2`, then `--repeat 3`). Each invocation generates the same pairs once; sampling is on, so the generations differ. `aggregate --run-name RUN_NAME` reports the mean ± standard deviation over the finished `repeat-*` directories.
 
 The results are:
 
@@ -26,6 +32,18 @@ The results are:
 - **Response latency**: time from a user speech span ending to the next model speech start. Lower means the model starts sooner. Treat lower as better when a reply is due. These are whole-file intervals, the same as stop latency.
 - **Behavior labels**: the judge assigns each pair one label for how the model handled the overlap. `C_RESPOND` means it addressed the overlap's content. `C_RESUME` means it ignored the overlap and continued. `C_UNCERTAIN_HANDLING` means it asked for a repeat or showed it did not catch the overlap. `C_UNKNOWN` means its reply was off-target or it said nothing. The shares have no single higher-is-better direction. The share that should be high is `C_RESPOND` on `user_interruption`, and `C_RESUME` on `user_backchannel`, `talking_to_other` and `background_speech`. `C_UNKNOWN` should be low. `C_UNCERTAIN_HANDLING` records uncertainty and has no quality direction of its own.
 - **Semantic quality** (non-official, `JUDGE=qwen`): a label says what the model did, not whether it was right. A `C_RESUME` that ignored a real interruption and a `C_RESUME` that correctly ignored a backchannel look the same. The semantic judge grades each pair on three axes, each `accept`, `fail` or `unresolved`: `interaction_handling` (did it handle the overlap correctly for its category), `relevance` (did it address the operative request) and `grounding` (no unsupported facts, claimed actions or false memories). `joint` fails if any axis fails and accepts only if all three accept. Every verdict must quote an exact substring of the transcript it relies on; a verdict with a missing or invalid quote becomes `unresolved`, never a pass. Each cell reports `quality = A/(A+F)` and `coverage = (A+F)/N`, where N is every selected pair. Higher quality is better. Higher coverage is better. Read them together: a high quality over a low coverage is a judgment on few pairs.
+
+### The pipeline
+
+The pipeline has three steps. Each step handles whatever the run selected from both datasets:
+
+| Step | Subcommand | What it does |
+|---|---|---|
+| 1. Generate | `generate` | Starts the model server, streams every selected input to `/v1/realtime` (two sessions per v1.5 pair, one per v1.0 sample), records the model's audio, stops the server, then cuts a fixed observation window per session |
+| 2. ASR | `asr` | Transcribes the input and output audio with word timestamps (Parakeet); for v1.5 also computes VAD speech intervals with the official timing code |
+| 3. Judge | `judge` | Starts the judge server; for v1.5 sends the four transcripts of each pair to the judge with the official prompt and runs the semantic A/F/U judge (Qwen only); for v1.0 runs the official evaluator on each subset, with the interruption relevance requests sent to the same judge; stops the server, then writes `summary.json` and `report.txt` |
+
+Every step takes `--run-name` and `--repeat`. A run is one fixed selection of samples under `$FDB_WORK/runs/RUN_NAME`. `--repeat N` does not run the benchmark N times, and it does not mean "repeat three times." One command runs once. The value is only a string inserted into the output path, `$FDB_WORK/runs/RUN_NAME/repeat-N/`, so you can tell that invocation apart from another invocation of the same run. The default is `--repeat 1`, which writes `repeat-1/`. `--repeat 3` still runs once, and it writes `repeat-3/`. To measure variance, invoke the three steps again yourself with a different N (`--repeat 2`, then `--repeat 3`). Each invocation generates the same samples once; sampling is on, so the generations differ. `aggregate --run-name RUN_NAME` reports the mean ± standard deviation over the finished `repeat-*` directories.
 
 ## Hardware and judge
 
@@ -35,8 +53,8 @@ Two judges are supported, selected by `JUDGE`:
 
 | `JUDGE` | Model | Notes |
 |---|---|---|
-| `qwen` (default) | [Qwen3.8-27B](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B), served locally by SGLang | Behavior labels: non-thinking, greedy, seeds 1-3. Semantic judge: thinking, temperature 0, seed 1. |
-| `gpt` | `gpt-4o-2024-08-06` | The paper's judge. Needs `OPENAI_API_KEY`. |
+| `qwen` (default) | [Qwen3.8-27B](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B), served locally by SGLang | v1.5 behavior labels: non-thinking, greedy, seeds 1-3. Semantic judge: thinking, temperature 0, seed 1. v1.0 interruption relevance: non-thinking, the official prompt, non-official |
+| `gpt` | `gpt-4o-2024-08-06` for v1.5; `gpt-4-turbo` for v1.0 relevance, as the official evaluator requests | The paper's judges. Needs `OPENAI_API_KEY`. |
 
 The semantic judge uses the frozen prompt, response schema and six control cases in `benchmarks/duplex/semantic/`. Before grading, every run sends the six controls and stops if any of the 18 axis statuses differs from `control-expected.json`. Passing the controls is a rubric check, not a measure of judge accuracy.
 
@@ -46,17 +64,17 @@ Run these commands from the repository root, with the sglang-omni virtualenv act
 
 ```bash
 cd <path/to/sglang-omni>
-python -m benchmarks.duplex.fdb_v15 setup
+python -m benchmarks.duplex.fdb setup
 ```
 
-`setup` needs `git` and `uv` on `PATH`, and FFmpeg shared libraries (version 4 to 8, the range torchcodec 0.11 loads) on the host: torchcodec, which the pinned v1.0 backchannel evaluator reads WAV files through, installs without them and only fails when it loads, so `setup` loads it once and stops if FFmpeg is missing. It is safe to rerun and skips finished steps; a workspace set up without the v1.0 dataset needs one rerun before `generate` selects v1.0 samples (until then pass `--v10-per-subset 0`). It first installs the `minicpm-o` extra of sglang-omni (`onnx` and `einops`, which the MiniCPM-o server imports) into the active venv, leaving every other package unchanged. Everything else goes under `FDB_WORK` (default `$HOME/fdb`):
+`setup` needs `git`, `uv` and FFmpeg shared libraries (version 4 to 8) on the host. It is safe to rerun and skips finished steps. It first installs the `minicpm-o` extra of sglang-omni (`onnx` and `einops`, which the MiniCPM-o server imports) into the active venv, leaving every other package unchanged. Everything else goes under `FDB_WORK` (default `$HOME/fdb`):
 
 | Path | Content |
 |---|---|
 | `Full-Duplex-Bench/` | Official scoring code at the pinned revision `3e799c4`; file hashes are checked |
-| `dataset/v1.5/` | The four v1.5 subsets, downloaded from the official Google Drive; `dataset/v1.5.revision` holds the archive hash |
-| `dataset/v1.0/` | The five v1.0 subsets from the same Google Drive; `dataset/v1.0.revision` holds their archive hash |
-| `scoring-venv/` | Python 3.12 with NeMo 3.0.0, torch 2.11 (cu130) and Silero VAD 6.2.1 for ASR and timing, plus python-dotenv and torchcodec for the v1.0 evaluators |
+| `dataset/v1.0/` | The five v1.0 subsets, downloaded from the official Google Drive; `dataset/v1.0.revision` holds the archive hash |
+| `dataset/v1.5/` | The four v1.5 subsets, from the same Google Drive; `dataset/v1.5.revision` holds the archive hash |
+| `scoring-venv/` | Python 3.12 with NeMo 3.0.0, torch 2.11 (cu130), Silero VAD 6.2.1 and torchcodec for ASR, timing and the official evaluators |
 | `models/parakeet-tdt-0.6b-v2/` | ASR checkpoint, SHA-256 checked |
 | `models/MiniCPM-o-4_5/` | Model under test at revision `503e754`. To reuse an existing copy, symlink it here or set `MODEL_PATH` |
 | `models/Qwen3.8-27B/` | Judge checkpoint; its commit is saved in `models/Qwen3.8-27B.revision` |
@@ -65,84 +83,79 @@ To change a default, export the variable before running a subcommand. The variab
 
 ## Step 1-3: run the benchmark
 
-Run everything in one terminal in the repository root, with the sglang-omni venv active. Run a preflight first. It takes one pair per v1.5 category and three samples per v1.0 subset (4 pairs and 15 samples, about 15 minutes end to end, mostly server startup and the semantic judge) and catches environment problems before a long run. Three v1.0 samples rather than one because the pinned turn-taking and interruption evaluators divide by the number of takeovers: when no selected sample takes the turn they raise `ZeroDivisionError`, which is a property of the model's behavior on those samples, not of the environment.
+Run everything in one terminal in the repository root, with the sglang-omni venv active. Run a preflight first. It takes three samples per v1.0 subset and one pair per v1.5 category (15 samples and 4 pairs, about 15 minutes end to end, mostly server startup and the semantic judge) and catches environment problems before a long run. Three v1.0 samples rather than one because the official turn-taking and interruption evaluators divide by the number of takeovers, so a selection in which no sample takes the turn cannot be scored:
 
 ```bash
-python -m benchmarks.duplex.fdb_v15 generate --run-name preflight --per-subset 1 --v10-per-subset 3
-python -m benchmarks.duplex.fdb_v15 asr --run-name preflight
-python -m benchmarks.duplex.fdb_v15 judge --run-name preflight
-python -m benchmarks.duplex.fdb_v15 aggregate --run-name preflight
+python -m benchmarks.duplex.fdb generate --run-name preflight --v15-per-subset 1 --v10-per-subset 3
+python -m benchmarks.duplex.fdb asr --run-name preflight
+python -m benchmarks.duplex.fdb judge --run-name preflight
+python -m benchmarks.duplex.fdb aggregate --run-name preflight
 ```
 
-The preflight passes when `generate` prints `{"pass": 8}` and `{"eligible_pairs": 4, ...}` for v1.5 and `{"pass": 15}` and `"eligible": 3` for each v1.0 subset, `asr` prints `{"ok": 16}` and `{"ok": 8}` and then three transcripts per v1.0 subset, and `judge` prints `{"valid": 4}`, `controls: 18/18 axis statuses match` and the `[Result]` numbers of each v1.0 subset. If anything differs, see [Troubleshooting](#troubleshooting).
+The preflight passes when `generate` prints `{"pass": 8}` and `{"eligible_pairs": 4, ...}` for v1.5 and `{"pass": 15}` with `"eligible": 3` for each v1.0 subset, `asr` prints `{"ok": 16}` and `{"ok": 8}` and then three transcripts per v1.0 subset, and `judge` prints `{"valid": 4}`, `controls: 18/18 axis statuses match` and the `[Result]` numbers of each v1.0 subset. If anything differs, see [Troubleshooting](#troubleshooting).
 
 The loop below is an ordinary shell loop. It calls the benchmark three times. `--repeat` does not loop by itself. The first iteration writes `$FDB_WORK/runs/minicpmo-48/repeat-1/`, the second writes `repeat-2/`, and the third writes `repeat-3/`. A later iteration does not overwrite an earlier one.
 
 ```bash
 for repeat in 1 2 3; do
-    python -m benchmarks.duplex.fdb_v15 generate --run-name minicpmo-48 --repeat "$repeat" --per-subset 12
-    python -m benchmarks.duplex.fdb_v15 asr --run-name minicpmo-48 --repeat "$repeat"
-    python -m benchmarks.duplex.fdb_v15 judge --run-name minicpmo-48 --repeat "$repeat"
+    python -m benchmarks.duplex.fdb generate --run-name minicpmo-48 --repeat "$repeat" --v15-per-subset 12 --v10-per-subset 12
+    python -m benchmarks.duplex.fdb asr --run-name minicpmo-48 --repeat "$repeat"
+    python -m benchmarks.duplex.fdb judge --run-name minicpmo-48 --repeat "$repeat"
 done
-python -m benchmarks.duplex.fdb_v15 aggregate --run-name minicpmo-48
+python -m benchmarks.duplex.fdb aggregate --run-name minicpmo-48
 ```
 
-### Choosing pairs
+### Choosing samples
 
-Only `generate` selects pairs; `asr` and `judge` score whatever that repeat recorded. Selection is deterministic, never random: each category takes its first N samples in numeric sample-ID order (1, 2, …, 10, 11, …), so every run and repeat with the same options evaluates the same pairs, and a smaller N is always a prefix of a larger one. The categories hold 200 (`user_interruption`), 98 (`user_backchannel`), 100 (`talking_to_other`) and 100 (`background_speech`) pairs.
+Only `generate` selects samples; `asr` and `judge` score whatever that repeat recorded. Selection is deterministic, never random, and the same for both datasets: each subset takes its first N samples in numeric sample-ID order (1, 2, …, 10, 11, …), so every run and repeat with the same options evaluates the same samples, and a smaller N is always a prefix of a larger one. For v1.5 a sample is a pair (two sessions); the categories hold 200 (`user_interruption`), 98 (`user_backchannel`), 100 (`talking_to_other`) and 100 (`background_speech`) pairs. For v1.0 a sample is one session; the subset sizes are in the table above.
 
-v1.0 samples are selected the same way, independently of the v1.5 pairs: the first N per subset in numeric order. The subsets hold 137 (`synthetic_pause_handling`), 216 (`candor_pause_handling`), 119 (`candor_turn_taking`), 200 (`synthetic_user_interruption`) and 55 (`icc_backchannel`) samples. Without a v1.0 option, v1.0 takes the `--per-subset` count, so the default run measures both sets; explicit `--sample-id` or `--sample-ids-file` pairs leave v1.0 out unless `--v10-per-subset`, `--v10-subset-count`, `--v10-sample-id` or `--v10-sample-ids-file` is given.
+The options come in two sets, `--v15-*` for v1.5 and `--v10-*` for v1.0, and both default to 12 per subset. A count of `0` leaves that dataset out of the run; leaving both out is an error.
 
 | `generate` option | Effect |
 |---|---|
-| `--per-subset N` | N pairs from every category (default 12); `all` selects all 498 (and, without a v1.0 option, all 727 v1.0 samples) |
-| `--subset-count CATEGORY=N` | Overrides `--per-subset` for one category; `0` skips it, `all` takes all of it. Repeatable |
-| `--sample-id CATEGORY/ID` | Exactly these pairs. Repeatable |
-| `--sample-ids-file PATH` | One `CATEGORY/ID` per line, such as another run's `repeat-1/sample-ids.txt` |
-| `--v10-per-subset N` | N samples from every v1.0 subset (default: the `--per-subset` count); `0` leaves v1.0 out, `all` selects all 727 |
-| `--v10-subset-count SUBSET=N` | Overrides `--v10-per-subset` for one v1.0 subset; `0` skips it, `all` takes all of it. Repeatable |
-| `--v10-sample-id SUBSET/ID` | Exactly these v1.0 samples. Repeatable |
-| `--v10-sample-ids-file PATH` | One `SUBSET/ID` per line, such as another run's `repeat-1/v10/sample-ids.txt` |
+| `--v15-per-subset N`, `--v10-per-subset N` | N samples from every subset of that dataset (default 12); `all` selects the whole dataset (498 pairs, 727 samples); `0` leaves it out |
+| `--v15-subset-count CATEGORY=N`, `--v10-subset-count SUBSET=N` | Overrides the per-subset count for one subset; `0` skips it, `all` takes all of it. Repeatable |
+| `--v15-sample-id CATEGORY/ID`, `--v10-sample-id SUBSET/ID` | Exactly these samples of that dataset. Repeatable |
+| `--v15-sample-ids-file PATH`, `--v10-sample-ids-file PATH` | One ID per line, such as another run's `repeat-1/sample-ids.txt` or `repeat-1/v10/sample-ids.txt` |
 
 ```bash
-# 20 interruptions, 10 backchannels, no other categories.
-python -m benchmarks.duplex.fdb_v15 generate --run-name small --per-subset 0 \
-    --subset-count user_interruption=20 --subset-count user_backchannel=10
-# Both full datasets: 498 pairs and 727 v1.0 samples.
-python -m benchmarks.duplex.fdb_v15 generate --run-name minicpmo-full --per-subset all --v10-per-subset all
-# Two specific pairs.
-python -m benchmarks.duplex.fdb_v15 generate --run-name debug \
-    --sample-id user_interruption/1 --sample-id background_speech/7
-# v1.5 only.
-python -m benchmarks.duplex.fdb_v15 generate --run-name v15-only --v10-per-subset 0
-# 12 v1.5 pairs per category, every v1.0 backchannel sample and no other v1.0 subset.
-python -m benchmarks.duplex.fdb_v15 generate --run-name backchannel \
+# Both full datasets: 727 v1.0 samples and 498 v1.5 pairs.
+python -m benchmarks.duplex.fdb generate --run-name minicpmo-full --v15-per-subset all --v10-per-subset all
+# v1.0 only, and v1.5 only.
+python -m benchmarks.duplex.fdb generate --run-name v10-only --v15-per-subset 0
+python -m benchmarks.duplex.fdb generate --run-name v15-only --v10-per-subset 0
+# 20 interruptions and 10 backchannels from v1.5, every v1.0 backchannel sample, nothing else.
+python -m benchmarks.duplex.fdb generate --run-name small \
+    --v15-per-subset 0 --v15-subset-count user_interruption=20 --v15-subset-count user_backchannel=10 \
     --v10-per-subset 0 --v10-subset-count icc_backchannel=all
-# One v1.0 sample next to one v1.5 pair.
-python -m benchmarks.duplex.fdb_v15 generate --run-name one-sample \
-    --sample-id user_interruption/1 --v10-sample-id candor_turn_taking/37
-# Replay another run's selection; a run with v1.0 has two ID files.
-python -m benchmarks.duplex.fdb_v15 generate --run-name replay \
-    --sample-ids-file "$FDB_WORK/runs/minicpmo-48/repeat-1/sample-ids.txt" \
+# Three specific samples.
+python -m benchmarks.duplex.fdb generate --run-name debug \
+    --v15-sample-id user_interruption/1 --v15-sample-id background_speech/7 \
+    --v10-sample-id candor_turn_taking/37
+# Replay another run's selection.
+python -m benchmarks.duplex.fdb generate --run-name replay \
+    --v15-sample-ids-file "$FDB_WORK/runs/minicpmo-48/repeat-1/sample-ids.txt" \
     --v10-sample-ids-file "$FDB_WORK/runs/minicpmo-48/repeat-1/v10/sample-ids.txt"
 ```
 
-`generate` prints the per-category counts it selected and writes the selected pair IDs to `repeat-N/sample-ids.txt` and the selected v1.0 sample IDs to `repeat-N/v10/sample-ids.txt`. Every repeat of a run must select the same pairs and the same v1.0 samples: a later repeat with a different selection stops with an error, so use a new `--run-name` instead. Pass the same selection options to every repeat; a run whose earlier repeats have no `v10/sample-ids.txt` continues with `--v10-per-subset 0`.
+`generate` prints the per-subset counts it selected and writes the selected IDs to `repeat-N/sample-ids.txt` (v1.5) and `repeat-N/v10/sample-ids.txt` (v1.0). Every repeat of a run must select the same samples from both datasets: a later repeat with a different selection stops with an error, so use a new `--run-name` instead. Pass the same selection options to every repeat.
 
 Approximate wall time per repeat on H200, with one session at a time. Each `generate` adds about 1 minute of model server startup, and each `judge` about 2 minutes of judge server startup:
 
-| Pairs | `generate` | `asr` | `judge` |
+| Selection | `generate` | `asr` | `judge` |
 |---|---|---|---|
-| 48 | ~25 min | ~1 min | ~6 min |
-| 498 | ~4 h | ~10 min | ~45 min |
+| 48 v1.5 pairs | ~25 min | ~1 min | ~6 min |
+| 498 v1.5 pairs | ~4 h | ~10 min | ~45 min |
+| 60 v1.0 samples | ~25 min | ~1 min | ~1 min |
+| 727 v1.0 samples | ~5 h | ~5 min | ~5 min |
 
-Sessions run in real time (about 15 s each), so generation dominates. Most of `judge` is the semantic judge: thinking-mode batches of up to 8 pairs take about 5 minutes each, and 8 batches run concurrently. `generate --num-shards 2` roughly halves it; read the note on `--num-shards` before using it.
-
-The table counts v1.5 pairs only. Each selected v1.0 sample adds one real-time session to `generate`: 60 sessions with the default `--per-subset 12`, 727 sessions of up to about 45 s each with `--v10-per-subset all` (on the order of 5 hours; the Candor inputs are much longer than the synthetic ones). The v1.0 ASR and evaluation add about a minute each to `asr` and `judge`.
+Sessions run in real time (about 15 s per v1.5 session, up to about 45 s per Candor v1.0 sample), so generation dominates. Most of a v1.5 `judge` is the semantic judge: thinking-mode batches of up to 8 pairs take about 5 minutes each, and 8 batches run concurrently. `generate --num-shards 2` roughly halves generation; read the note on `--num-shards` before using it.
 
 ## Results
 
-`aggregate` prints the table and writes it to `$FDB_WORK/runs/RUN_NAME/RESULTS.md`. Each latency and label cell is the mean ± sample standard deviation over the finished repeats; count cells show one value, or a range when repeats differ. This is the validation run (MiniCPM-o 4.5, `--per-subset 3`, two repeats, Qwen judge), so the samples are small:
+`aggregate` prints the tables and writes them to `$FDB_WORK/runs/RUN_NAME/RESULTS.md`, one section per dataset the run selected. Each latency and label cell is the mean ± sample standard deviation over the finished repeats; count cells show one value, or a range when repeats differ.
+
+The v1.5 section looks like this. It is the validation run (MiniCPM-o 4.5, `--v15-per-subset 3`, two repeats, Qwen judge), so the samples are small:
 
 | Category | Pairs | Timed overlap sessions | Stop latency (s) | Response latency (s) | C_RESPOND | C_RESUME | C_UNCERTAIN_HANDLING | C_UNKNOWN | Judged pairs |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -156,7 +169,7 @@ The table counts v1.5 pairs only. Each selected v1.0 sample adds one real-time s
 - `Timed overlap sessions` is how many overlap sessions produced timing intervals.
 - `Judged pairs` is how many pairs got a valid label. The label shares use only these pairs.
 
-With `JUDGE=qwen`, `RESULTS.md` adds a semantic table. From the same validation run:
+With `JUDGE=qwen`, the v1.5 section adds a semantic table. From the same validation run:
 
 | Category | interaction_handling quality | interaction_handling coverage | relevance quality | relevance coverage | grounding quality | grounding coverage | joint quality | joint coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -168,21 +181,21 @@ With `JUDGE=qwen`, `RESULTS.md` adds a semantic table. From the same validation 
 
 Always read quality together with coverage: a high quality over a low coverage is a judgment on few pairs.
 
-With v1.0 samples selected, `RESULTS.md` ends with an `FDB v1.0 results` table, one row per selected v1.0 subset with the same mean ± standard deviation over repeats. Its columns are `Selected` (recorded samples), `Eligible` (exports the pinned evaluator can score), `Evaluated` (the ones it scored), `Takeover rate`, `Latency (s)`, `Relevance (0-5)`, `Judge retries`, `Backchannel frequency` and `Backchannel JSD`; a column the subset's task does not report shows `n/a`. The rows come from the export manifest, so a subset whose sessions all failed shows `Eligible 0` with `n/a` metrics, and a subset whose evaluation failed shows `Eligible` above `Evaluated`. A nonzero `Judge retries` means the pinned evaluator counted a retried interruption more than once, which inflates that subset's takeover rate. Subsets are never pooled. When some repeats have no v1.0 export, the section says which repeats its cells come from. Which direction is better per subset is in [Full-Duplex-Bench v1.0](#full-duplex-bench-v10). With `JUDGE=qwen` the relevance rating comes from the local judge and is non-official.
+The v1.0 section has one row per selected subset, with the columns `Selected` (recorded samples), `Eligible` (exports the official evaluator can score), `Evaluated` (the ones it scored), `Takeover rate`, `Latency (s)`, `Relevance (0-5)`, `Judge retries`, `Backchannel frequency` and `Backchannel JSD`; a column the subset's task does not report shows `n/a`. The rows come from the export manifest, so a subset whose sessions all failed shows `Eligible 0` with `n/a` metrics, and a subset whose evaluation failed shows `Eligible` above `Evaluated`. A nonzero `Judge retries` means the official evaluator counted a retried interruption more than once, which inflates that subset's takeover rate (see [v1.0 reference path](#v10-reference-path)).
 
 Per-repeat outputs are under `$FDB_WORK/runs/RUN_NAME/repeat-N/`:
 
 | Path | Content |
 |---|---|
-| `sample-ids.txt` | The selected pairs |
-| `recording/shard-*/` | Raw session traces, input and output audio, protocol reports |
-| `reference-audio/` | Fixed-window WAVs used for scoring, plus `reference-manifest.json` with eligibility |
-| `scores/summary.json` | Timing, ASR coverage, and (for `JUDGE=gpt`) behavior labels |
+| `sample-ids.txt` | The selected v1.5 pairs (empty when v1.5 was left out) |
+| `recording/shard-*/` | Raw v1.5 session traces, input and output audio, protocol reports |
+| `reference-audio/` | Fixed-window WAVs used for v1.5 scoring, plus `reference-manifest.json` with eligibility |
+| `scores/summary.json` | v1.5 timing, ASR coverage, and (for `JUDGE=gpt`) behavior labels |
 | `judge-qwen/summary.json` | Qwen behavior labels (`JUDGE=qwen` only) |
 | `semantic-qwen/` | Semantic judge (`JUDGE=qwen` only): `controls/comparison.json`, `inputs.json` (the exact packets sent), `batches/*/` (request, raw response, validated assessments), `quality-outcomes.json` (per-pair axes, joint and any conversion reasons) and `summary.json` |
-| `report.txt` | Human-readable coverage, timing and semantic quality report |
+| `report.txt` | Human-readable v1.5 coverage, timing and semantic quality report |
 | `logs/` | Recorder logs; `scores/logs/` holds ASR and timing logs |
-| `v10/sample-ids.txt` | The selected v1.0 samples; the `v10/` directory exists only when v1.0 samples were selected |
+| `v10/sample-ids.txt` | The selected v1.0 samples; the `v10/` directory exists only when v1.0 was selected |
 | `v10/recording/shard-*/` | Raw v1.0 session traces, with recorder logs in `v10/logs/` |
 | `v10/reference/` | v1.0 export tree: `manifest.json`, `<subset>/<id>/output.wav`, the ASR receipt `asr.json`, `summary.json`, the judge ledger under `judge/` and evaluator logs under `logs/` |
 
@@ -190,41 +203,41 @@ With `JUDGE=qwen`, the "Official behavior label distribution" section of `report
 
 ## Settings
 
-Per-run choices (`--run-name`, `--repeat`, pair selection, `--num-shards`) are command options; run any subcommand with `--help` to list them. Machine settings are environment variables, read in `benchmarks/duplex/fdb_v15/common.py`. Run the subcommands with the sglang-omni venv active; that interpreter serves the models and records sessions.
+Per-run choices (`--run-name`, `--repeat`, sample selection, `--num-shards`) are command options; run any subcommand with `--help` to list them. Machine settings are environment variables, read in `benchmarks/duplex/fdb/common.py`. Run the subcommands with the sglang-omni venv active; that interpreter serves the models and records sessions.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `FDB_WORK` | `$HOME/fdb` | Root for downloads, environments and results |
 | `JUDGE` | `qwen` | `qwen` or `gpt` |
+| `SERVER_CONFIG` | `examples/full_duplex/minicpmo.yaml` | Server config. Sampling is on, so repeats measure generation variance |
 | `CUDA_VISIBLE_DEVICES` | unset | One GPU index. When set, this chooses the card. Concurrent jobs export different indexes; see [Concurrent runs](#concurrent-runs) |
 | `GPU` | `0` | Used only when `CUDA_VISIBLE_DEVICES` is unset. Must be a single numeric index |
 | `SERVER_PORT` / `JUDGE_PORT` | `8097 + 10×GPU` / `30000 + 10×GPU` | Local ports. Unset values are derived from the GPU index, so two jobs do not share a port. The judge NCCL port is the judge port + 1. Do not pick a port in 29500–29899; that range is reserved for model-server NCCL |
 | `MODEL_PATH` | `$FDB_WORK/models/MiniCPM-o-4_5` | Checkpoint directory of the model under test |
 | `MODEL_REVISION` | `503e754…` | Recorded in the run manifest; must match `MODEL_PATH` |
-| `SESSION_TIMEOUT_S` | `90` | Per-session client deadline; the longest v1.5 input is about 18 s |
-| `V10_SESSION_TIMEOUT_S` | `230` | Per-session client deadline for v1.0 sessions; the Candor inputs are much longer than the v1.5 ones. Both deadlines are checked at start: values above the recorder's 230 s ceiling are rejected |
-| `SCORING_VENV` | `$FDB_WORK/scoring-venv` | Venv that runs ASR, timing and the judge clients |
+| `SESSION_TIMEOUT_S` | `90` | Per-session client deadline for v1.5 sessions; the longest v1.5 input is about 18 s |
+| `V10_SESSION_TIMEOUT_S` | `230` | Per-session client deadline for v1.0 sessions; the Candor inputs run up to about 45 s. Both deadlines must stay within the recorder's 230 s ceiling |
+| `SCORING_VENV` | `$FDB_WORK/scoring-venv` | Venv that runs ASR, timing, the official evaluators and the judge clients |
 
 ## Notes
 
-- **`--repeat` only labels the directory.** It does not repeat the run. `generate --repeat 1` and `generate --repeat 2` write `repeat-1/` and `repeat-2/` and leave each other alone. `generate --repeat N` also refuses to overwrite an existing `repeat-N/recording`. To redo that one invocation, delete `$FDB_WORK/runs/RUN_NAME/repeat-N` and rerun all three steps for the same N. `asr` and `judge` resume finished work when rerun.
-- **Keep the settings fixed across the repeats of one run.** Never mix repeats with different pair selections, `--num-shards` or judge; use a new `--run-name` instead.
-- **`--num-shards` changes what you measure.** With `--num-shards 2`, two sessions share the GPU, so latencies are measured under load and are not comparable to one shard. The model server keeps `max_sessions` at 2, so use at most 2; extra connections are rejected with HTTP 503.
-- **The first 48 pairs are not a random sample.** `--per-subset 12` takes the first 12 samples of each category. This gives fast, comparable numbers between runs, but they are not full-dataset estimates.
+- **`--repeat` only labels the directory.** It does not repeat the run. `generate --repeat 1` and `generate --repeat 2` write `repeat-1/` and `repeat-2/` and leave each other alone. `generate --repeat N` also refuses to overwrite a repeat that holds a recording. To redo that one invocation, delete `$FDB_WORK/runs/RUN_NAME/repeat-N` and rerun all three steps for the same N. `asr` and `judge` resume finished work when rerun: the v1.5 phases resume per work unit (`--retry-failed` retries the failed ones), the v1.0 ASR runs again in full, and the v1.0 evaluation runs again for every subset that `summary.json` does not hold yet.
+- **Keep the settings fixed across the repeats of one run.** Never mix repeats with different sample selections, `--num-shards`, `SERVER_CONFIG` or judge; use a new `--run-name` instead.
+- **`--num-shards` changes what you measure.** With `--num-shards 2`, two sessions share the GPU, so latencies are measured under load and are not comparable to one shard. It must not exceed `max_sessions` in `SERVER_CONFIG` (2 by default); extra connections are rejected with HTTP 503.
+- **Repeats need sampling.** `minicpmo-parity.yaml` decodes greedily, so its repeats are nearly identical. Use it for regression checks against a fixed recording, not for variance.
+- **The first N samples are not a random sample.** `--v15-per-subset 12` takes the first 12 pairs of each category, and `--v10-per-subset 12` the first 12 samples of each subset. This gives fast, comparable numbers between runs, but they are not full-dataset estimates.
 - **Non-passing sessions are never dropped.** They count as ineligible in the denominators, and empty interval sets show as `n/a`, not zero.
-- **v1.0 rides on the same run.** `generate` records the v1.0 samples right after the v1.5 pairs on the same server, `asr` and `judge` score them after the v1.5 phases, and a repeat whose v1.0 selection differs from an earlier repeat is refused like a differing pair selection. A run with `--v10-per-subset 0` writes no `v10/` directory and no v1.0 table. A repeat that selected v1.0 samples but has no v1.0 export is refused by `asr` and `judge`, as a repeat without the v1.5 export is.
-- **`--retry-failed` is a v1.5 option.** The v1.0 ASR restarts in full when rerun, and `judge` evaluates again every v1.0 subset that `summary.json` does not hold, each in its own evaluator call, so one failing subset does not hold back the others.
 - **Concurrent jobs use one GPU each.** Ports, the judge config directory and compile caches are derived from `CUDA_VISIBLE_DEVICES`. The procedure is [Concurrent runs](#concurrent-runs).
 
 ## Scoring CLI reference
 
-The subcommands wrap three CLIs: `benchmarks.eval.benchmark_duplex_v15` records sessions, `benchmarks.eval.benchmark_duplex_reference` scores them with the official v1.5 ASR, timing and behavior code, and `benchmarks.eval.benchmark_duplex_v10` (`record`, `reference-export`, `reference-asr`, `reference-evaluate`; see [Full-Duplex-Bench v1.0](#full-duplex-bench-v10)) does the same for v1.0. Use them directly to score a recording outside the runbook. Run `eval "$(python -m benchmarks.duplex.fdb_v15 env)"` first so the variables below are set. `record` needs the model server and `custom-judge` needs the judge server; start them in another terminal with `python -m benchmarks.duplex.fdb_v15 serve-model` or `serve-judge`, which run in the foreground until Ctrl-C.
+The subcommands wrap three CLIs: `benchmarks.eval.benchmark_duplex_v15` records v1.5 sessions, `benchmarks.eval.benchmark_duplex_reference` scores them with the official v1.5 ASR, timing and behavior code, and `benchmarks.eval.benchmark_duplex_v10` records and scores v1.0 sessions. Use them directly to score a recording outside the runbook. Run `eval "$(python -m benchmarks.duplex.fdb env)"` first so the variables below are set. `record` needs the model server and `custom-judge` needs the judge server; start them in another terminal with `python -m benchmarks.duplex.fdb serve-model` or `serve-judge`, which run in the foreground until Ctrl-C.
 
 ### Dependencies and source
 
 The official scoring scripts and behavior prompt are not vendored. They are loaded from a [Full-Duplex-Bench checkout](https://github.com/DanielLin94144/Full-Duplex-Bench/tree/3e799c45a045256f47d5f1c9cda90157e2d2ec9e) at revision `3e799c45a045256f47d5f1c9cda90157e2d2ec9e`, and their SHA-256 is checked before every run. Their [CC BY-NC 4.0 license](https://github.com/DanielLin94144/Full-Duplex-Bench/blob/3e799c45a045256f47d5f1c9cda90157e2d2ec9e/LICENSE) applies.
 
-The scoring venv uses Python 3.12, torch and torchaudio 2.11.0+cu130, NeMo 3.0.0, Silero VAD 6.2.1, numpy 2.5.3, scipy 1.18.1, soundfile 0.14.0, openai 3.28.0 and pydantic. Each phase records its actual package versions. No command downloads a model implicitly. ASR uses a local `nvidia/parakeet-tdt-0.6b-v2` checkpoint at revision `ae9ad07059c7c739ffaf932226a8fe64ae2620b0`; its `.nemo` SHA-256 is `d99e39955c9d3d0350d8fb7c75e40c64a2b2eaeb003883d7c941fd2e8747b28c`.
+The scoring venv uses Python 3.12, torch and torchaudio 2.11.0+cu130, NeMo 3.0.0, Silero VAD 6.2.1, numpy 2.5.3, scipy 1.18.1, soundfile 0.14.0, openai 3.28.0, pydantic, python-dotenv and torchcodec 0.11 (the v1.0 backchannel evaluator reads WAV files through torchaudio, which needs torchcodec and FFmpeg). Each phase records its actual package versions. No command downloads a model implicitly. ASR uses a local `nvidia/parakeet-tdt-0.6b-v2` checkpoint at revision `ae9ad07059c7c739ffaf932226a8fe64ae2620b0`; its `.nemo` SHA-256 is `d99e39955c9d3d0350d8fb7c75e40c64a2b2eaeb003883d7c941fd2e8747b28c`.
 
 ### Record and export
 
@@ -317,106 +330,9 @@ Both revisions must be 40-character commit hashes. `temperature`, `top_p` and `m
 
 Matching reruns skip finished samples. A changed config or selection needs a new `--out`, and changed transcripts, audio or ASR receipts prevent reuse. `--retry-failed` retries only transport and parsing failures. Wrong models, invalid labels and non-`stop` finishes stay invalid. Label shares use valid labels only, and the per-category Wilson 95% intervals describe dataset sampling, not human agreement or generation variance.
 
-### Measurement definitions
+### v1.0 reference path
 
-- **Input pacing.** Audio is sent in 80 ms packets. Every packet start must stay within 80 ms of its source cadence, otherwise the session is ineligible. This bounds transport jitter only.
-- **Observation window.** The output is scored over `[0, T]`, where T is the input length, anchored at the first input send. Received audio plays first-in first-out with no buffer, so initial delay, gaps and queueing remain. Audio still queued at T is cut, and the rest is silence; the result is mono 16 kHz PCM16 with exactly the input sample count. Errors inside the window make the session ineligible; silence is a valid output.
-- **Intervals.** The official timing code merges VAD speech spans with 0.6 s (user) and 0.5 s (model) gaps. Stop intervals are overlaps of user and model spans. Response intervals run from a user span end to the next strictly later model span start. These are whole-file intervals, not event-local latencies. `summary.json` reports their pooled means and medians with sample-cluster bootstrap CIs.
-- **Missing values.** Empty interval sets and missing labels are null, never zero latency or 0%. Counts keep every selected, eligible, invalid and unscored sample.
-- **Limits.** Simulated playout is not acoustic latency, and the fixed window can cut long replies. One generation per sample does not estimate generation variance. Prosody and MOS are not covered.
-
-### Verification
-
-The unit tests cover export, missing samples, valid silence, timing, ASR deduplication, bounded judging and resumption. With the pinned checkout they also run the official formulas on synthetic fixtures, without a GPU or API. Run them from the sglang-omni venv:
-
-```bash
-FDB_REFERENCE_SOURCE="$FDB_SOURCE" python -m pytest -q \
-    tests/unit_test/benchmarks/test_duplex_reference*.py
-```
-
-Export is deterministic: re-exporting a recording reproduces every eligible WAV byte for byte, and re-summarizing saved transcripts and intervals reproduces the same summaries, including coverage and bootstrap intervals.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `ERROR: the model server did not become ready` (or the judge server) | The message ends with the last lines of the server log; the full log is `repeat-N/logs/model-server.log` or `repeat-N/logs/judge-server.log` |
-| `ERROR: something already serves ...` | Another server holds the port, often a leftover from an interrupted run or a second job on the same GPU. Stop it, or give this job a different `CUDA_VISIBLE_DEVICES` / `SERVER_PORT` / `JUDGE_PORT` |
-| `ERROR: .../recording exists` | That repeat was already generated; use the next `--repeat` or delete the directory |
-| `ERROR: .../sample-ids.txt selects different pairs` | An earlier repeat of this run used another selection; pass the same selection options, or use a new `--run-name` |
-| `ERROR: .../v10/sample-ids.txt selects different v1.0 samples` | An earlier repeat of this run selected other v1.0 samples; pass the same v1.0 options, or use a new `--run-name` |
-| `ERROR: .../repeat-N is a v1.5-only repeat` | The earlier repeats of this run were generated without v1.0 samples; the message names the option change that continues the run (`--v10-per-subset 0`, or dropping the `--v10-subset-count` or v1.0 ID options), or use a new `--run-name` |
-| `ERROR: .../dataset/v1.0 lacks the v1.0 subset(s) ...` | The workspace has no (or a partial) v1.0 dataset; rerun `setup`, or make the option change the message names |
-| `ERROR: .../v10/reference/manifest.json is missing` | `generate` recorded v1.0 samples but did not finish their export; delete that `repeat-N` and generate it again. (A `v10/` directory left by an attempt that never recorded is removed by the next `generate` of that repeat) |
-| `WARNING: the v1.0 ASR failed` | `repeat-N/v10/reference/logs/asr.log` holds the pinned script's output; the traceback is printed on the terminal. Rerunning `asr` transcribes every v1.0 sample again |
-| `WARNING: the v1.0 evaluation failed for ...` | Read `repeat-N/v10/reference/logs/evaluate-<subset>.log`; the traceback is at its end. A `ZeroDivisionError` in `candor_turn_taking` or `synthetic_user_interruption` means no selected sample took the turn; the pinned evaluator cannot score that selection, so widen it (`--v10-per-subset 3` or more) in a new run. Other failures: fix the cause and rerun `judge`, which evaluates the missing subsets again |
-| `judge request ... got no parsable rating in 3 attempts` | The v1.0 relevance judge returned no rating for one interruption; the ledger under `v10/reference/judge/` shows each reply's `content`. The pinned parser needs `Analysis: <text>`, a line break, then `I would rate the AI's response as <digit>`; a reply with only the rating sentence, or both on one line, does not parse. The three attempts carry the same seed, so a self-hosted judge answers identically each time and a rerun repeats the failure |
-| A shard log reports `fail` or `error` sessions | They stay in the denominator. Read `repeat-N/logs/record-shard-*.log`. If most sessions fail, fix the server and redo the repeat |
-| HTTP 503 in record logs | `--num-shards` is larger than 2, the model server's `max_sessions` |
-| `--device cuda needs exactly one visible GPU` | `CUDA_VISIBLE_DEVICES` (or `GPU`, when the former is unset) must be a single index |
-| `ERROR: set CUDA_VISIBLE_DEVICES to exactly one GPU index` | A concurrent job must see one card. `export CUDA_VISIBLE_DEVICES=0` in one terminal and `=1` in the other |
-| `ERROR: GPU and CUDA_VISIBLE_DEVICES disagree` | Unset `GPU`, or set it to the same index as `CUDA_VISIBLE_DEVICES` |
-| `asr` or `judge` prints `WARNING: a phase reported failures` | A v1.5 phase failed; rerun the command the warning prints, the same step with `--retry-failed` |
-| `custom judge identity changed; use a new --out` | The judge config changed since this repeat was judged (for example, a different SGLang version). Delete `repeat-N/judge-qwen` and rerun `judge` for that repeat |
-| `Control check failed: this judge configuration is not accepted.` | The judge missed a control case; the printed lines show which. Do not grade with this configuration. Check that the judge server runs the pinned Qwen3.8-27B revision |
-| `... changed since this directory was created; use a new --out` | The semantic judge settings, prompt or inputs changed since this repeat was graded. Delete `repeat-N/semantic-qwen` and rerun `judge` for that repeat |
-| `model_mismatch` with `JUDGE=gpt` | The endpoint returned a model name other than `gpt-4o-2024-08-06`; use an endpoint that serves exactly that model |
-| `model-server.log` ends with `No module named 'onnx'` (or `einops`) | Rerun `setup`; it installs the `minicpm-o` extra into the active venv |
-| `ModuleNotFoundError` in `asr` | Rerun `setup`; it reinstalls the scoring venv packages |
-
-## Concurrent runs
-
-Open two terminals. Paste one block into each. Start both immediately; neither waits for the other. Each terminal keeps the sglang-omni venv active (`which python` prints that interpreter) and runs every line itself. Do not set `SERVER_PORT` or `JUDGE_PORT`. The model port is `8097 + 10×GPU` and the judge port is `30000 + 10×GPU`. The judge NCCL port is the judge port + 1. The judge config is `$FDB_WORK/judge/port-<judge port>/`. Compile caches are under `$FDB_WORK/cache/gpu-<index>/`.
-
-The first line from `generate` must be exactly the `Job GPU ...` line written under that terminal. GPU 0 is model port 8097, judge port 30000, judge NCCL port 30001. GPU 1 is model port 8107, judge port 30010, judge NCCL port 30011. A shell startup helper may have exported `CUDA_VISIBLE_DEVICES` already; the `export` in the block replaces it. `unset GPU` is required when that variable is set to a different index.
-
-Terminal 1:
-
-```bash
-cd <path/to/sglang-omni>
-export FDB_WORK="${FDB_WORK:-$HOME/fdb}"
-unset GPU SERVER_PORT JUDGE_PORT
-export CUDA_VISIBLE_DEVICES=0
-python -m benchmarks.duplex.fdb_v15 generate --run-name minicpmo-30-t1 --repeat 1 --per-subset 30
-python -m benchmarks.duplex.fdb_v15 asr --run-name minicpmo-30-t1 --repeat 1
-python -m benchmarks.duplex.fdb_v15 judge --run-name minicpmo-30-t1 --repeat 1
-python -m benchmarks.duplex.fdb_v15 aggregate --run-name minicpmo-30-t1
-```
-
-`generate` prints `Job GPU 0: model port 8097, judge port 30000 (nccl 30001), judge config /data/chenyang/fdb/judge/port-30000` when `FDB_WORK` is `/data/chenyang/fdb`. `aggregate` writes `$FDB_WORK/runs/minicpmo-30-t1/RESULTS.md`.
-
-Terminal 2:
-
-```bash
-cd <path/to/sglang-omni>
-export FDB_WORK="${FDB_WORK:-$HOME/fdb}"
-unset GPU SERVER_PORT JUDGE_PORT
-export CUDA_VISIBLE_DEVICES=1
-python -m benchmarks.duplex.fdb_v15 generate --run-name minicpmo-30-t2 --repeat 1 --per-subset 30
-python -m benchmarks.duplex.fdb_v15 asr --run-name minicpmo-30-t2 --repeat 1
-python -m benchmarks.duplex.fdb_v15 judge --run-name minicpmo-30-t2 --repeat 1
-python -m benchmarks.duplex.fdb_v15 aggregate --run-name minicpmo-30-t2
-```
-
-`generate` prints `Job GPU 1: model port 8107, judge port 30010 (nccl 30011), judge config /data/chenyang/fdb/judge/port-30010` when `FDB_WORK` is `/data/chenyang/fdb`. `aggregate` writes `$FDB_WORK/runs/minicpmo-30-t2/RESULTS.md`.
-
-A third terminal is the same block with `export CUDA_VISIBLE_DEVICES=2`, `--run-name minicpmo-30-t3`, model port 8117 and judge port 30020. Do not point two terminals at the same `--run-name`.
-
-## Full-Duplex-Bench v1.0
-
-v1.0 tests turn taking while the user is speaking: when the model should take the turn and when it should hold it. v1.5, above, plays overlapping speech while the model is speaking. v1.0 has 727 samples in five subsets, one session each:
-
-| Subset | Samples | Task | Data | Reported numbers |
-|---|---:|---|---|---|
-| `synthetic_pause_handling` | 137 | Pause handling | Synthetic | Takeover rate (lower is better) |
-| `candor_pause_handling` | 216 | Pause handling | Candor | Takeover rate (lower is better) |
-| `candor_turn_taking` | 119 | Smooth turn-taking | Candor | Takeover rate (higher), latency (lower) |
-| `synthetic_user_interruption` | 200 | User interruption | Synthetic | Takeover rate (higher), latency (lower), relevance 0-5 (higher) |
-| `icc_backchannel` | 55 | Backchannel | ICC | Takeover rate (lower), frequency, timing JSD to human backchannels (lower) |
-
-The reference path is the primary result. It runs the pinned Full-Duplex-Bench `get_transcript/asr.py` and `evaluation/evaluate.py` unchanged (revision `3e799c4`, SHA-256 checked) on the native recordings. Call these numbers pinned-reference scoring under the SGLang-Omni capture protocol: capture, VAD and judge versions can differ from the paper, so they are not directly comparable to published rows.
-
-The runbook runs this path itself for the selected v1.0 samples: `generate` records them and runs `reference-export` into `repeat-N/v10/reference/`, `asr` runs `reference-asr`, and `judge` runs `reference-evaluate` once per subset with the interruption relevance requests sent to the judge server (`JUDGE=qwen`, non-official) or to OpenAI (`JUDGE=gpt`). The commands below score a recording by hand, with the variables from `python -m benchmarks.duplex.fdb_v15 env`.
+v1.0 is scored by the official `get_transcript/asr.py` and `evaluation/evaluate.py` of the pinned checkout, run unchanged on the recordings. The runbook does this for the selected samples (`generate` records them and exports `repeat-N/v10/reference/`, `asr` runs `reference-asr`, `judge` runs `reference-evaluate` once per subset). By hand:
 
 ```bash
 OUT=results/fdb10
@@ -435,12 +351,99 @@ python -m benchmarks.eval.benchmark_duplex_v10 reference-evaluate \
     --tree "$OUT/reference" --reference-source "$FDB_SOURCE"
 ```
 
-- `reference-export` writes `<subset>/<id>/output.wav` (mono 16 kHz PCM16 over `[0, T]`, the same observation window as v1.5) and the sample's dataset annotation into a new directory, with `manifest.json` at the top. Repeat `--run` for shards; a later run may replace an incomplete capture, and a sample captured completely twice is an error. Ineligible sessions get no sample folder and stay in `manifest.json` with their reasons.
+- `reference-export` writes `<subset>/<id>/output.wav` (mono 16 kHz PCM16 over `[0, T]`, the same observation window as v1.5) and the sample's annotation into a new directory, with `manifest.json` at the top. Repeat `--run` for shards; a later run may replace an incomplete capture, and a sample captured completely twice is an error. Ineligible sessions get no sample folder and stay in `manifest.json` with their reasons.
 - `reference-asr` transcribes every sample with the local Parakeet checkpoint (CUDA graph decoding off). For user interruption it cuts the audio at the end of the interruption and shifts the word times back, so the transcript holds only the response. It writes `output.json` per sample and the receipt `asr.json`, and refuses to run twice on one tree.
-- `reference-evaluate` runs the pinned evaluator for each subset in the current interpreter's environment (`evaluate.py` as a subprocess for pause handling, turn taking and backchannel; `eval_user_interruption.py` imported in-process for the interruption subset, so the recording judge client can be passed in) and saves the printed `[Result]` numbers, the selected and evaluated counts and the log path per subset in `summary.json`. Synthetic and Candor pause handling are separate rows and are never pooled. `--subset` evaluates only the named subsets; the others can be added later, and repeating a subset needs a new export. The scoring venv also needs `python-dotenv` (imported by `evaluate.py`) and `torchcodec`, so that torchaudio 2.11 can read WAV files for backchannel.
+- `reference-evaluate` runs the official evaluator for each subset in the scoring venv (`evaluate.py` as a subprocess for pause handling, turn taking and backchannel; `eval_user_interruption.py` imported in-process for the interruption subset, so the recording judge client can be passed in) and saves the printed `[Result]` numbers, the selected and evaluated counts and the log path per subset in `summary.json`. `--subset` evaluates only the named subsets; the others can be added later, and repeating a subset needs a new export.
 
-**Interruption relevance.** The pinned evaluator requests `gpt-4-turbo` with seed 0 for every interruption the model takes over, although the benchmark README labels this column GPT-4o. It needs a key in `OPENAI_API_KEY` (or `--api-key-env`); without one, evaluate the other subsets with `--subset`. `--base-url URL --served-model NAME` sends the identical prompts to a self-hosted OpenAI-compatible judge, with thinking turned off and the answer capped at 512 tokens, since the pinned evaluator sets neither and SGLang would otherwise stop at 128 tokens. `summary.json` records the endpoint the client resolved (`--base-url`, else `OPENAI_BASE_URL`, else OpenAI) and marks relevance `"official": true` only for OpenAI's endpoint without `--served-model`. Every exchange is appended to `judge/user-interruption-<UTC time>.jsonl`.
+**Interruption relevance.** The official evaluator requests `gpt-4-turbo` with seed 0 for every interruption the model takes over. It needs a key in `OPENAI_API_KEY` (or `--api-key-env`); without one, evaluate the other subsets with `--subset`. `--base-url URL --served-model NAME` sends the identical prompts to a self-hosted OpenAI-compatible judge, with thinking turned off and the answer capped at 512 tokens, since the evaluator sets neither and SGLang would otherwise stop at 128 tokens. `summary.json` records the endpoint the client resolved (`--base-url`, else `OPENAI_BASE_URL`, else OpenAI) and marks relevance `"official": true` only for OpenAI's endpoint without `--served-model`. Every exchange is appended to `judge/user-interruption-<UTC time>.jsonl`.
 
-**Retry bug in the pinned evaluator.** When a rating does not parse, it resends the identical request without limit, and it has already appended that sample's takeover, so each retry counts the sample again in the takeover rate. Each parsed rating is also appended twice, which leaves the mean unchanged. The client stops after three identical requests, which fails the run, and `summary.json` reports `retries`. A nonzero value means the interruption takeover rate is inflated; `RESULTS.md` shows it as `Judge retries`. With a seeded self-hosted judge the three attempts return the same reply, so a parse failure is deterministic and needs a different judge or prompt, not a rerun.
+**Retry bug in the official evaluator.** When a rating does not parse, it resends the identical request without limit, and it has already appended that sample's takeover, so each retry counts the sample again in the takeover rate. Each parsed rating is also appended twice, which leaves the mean unchanged. The client stops after three identical requests, which fails the run, and `summary.json` reports `retries`. A nonzero value means the interruption takeover rate is inflated; `RESULTS.md` shows it as `Judge retries`. With a seeded self-hosted judge the three attempts return the same reply, so a parse failure is deterministic and needs a different judge or prompt, not a rerun.
 
-**Diagnostic score.** `transcribe` and `score` (`fdb-v10-synthetic-v4`) remain as a diagnostic, not the headline. It windows words to the input, uses its own backchannel classifier and adds gates the reference evaluator does not have: turn-taking samples where the model already speaks at the turn end, interruptions where the model was silent at the onset (`not_exercised`), and interruptions it talks straight through. Report its gate counts next to the reference numbers, never in their place.
+**Diagnostic score.** `transcribe` and `score` (`fdb-v10-synthetic-v4`) remain as a diagnostic, not the headline. It windows words to the input, uses its own backchannel classifier and adds gates the official evaluator does not have: turn-taking samples where the model already speaks at the turn end, interruptions where the model was silent at the onset (`not_exercised`), and interruptions it talks straight through. Report its gate counts next to the reference numbers, never in their place.
+
+### Measurement definitions
+
+- **Input pacing.** Audio is sent in 80 ms packets. Every packet start must stay within 80 ms of its source cadence, otherwise the session is ineligible. This bounds transport jitter only.
+- **Observation window.** The output is scored over `[0, T]`, where T is the input length, anchored at the first input send. Received audio plays first-in first-out with no buffer, so initial delay, gaps and queueing remain. Audio still queued at T is cut, and the rest is silence; the result is mono 16 kHz PCM16 with exactly the input sample count. Errors inside the window make the session ineligible; silence is a valid output. The same window serves both datasets.
+- **Intervals (v1.5).** The official timing code merges VAD speech spans with 0.6 s (user) and 0.5 s (model) gaps. Stop intervals are overlaps of user and model spans. Response intervals run from a user span end to the next strictly later model span start. These are whole-file intervals, not event-local latencies. `summary.json` reports their pooled means and medians with sample-cluster bootstrap CIs.
+- **Takeover and latency (v1.0).** The official evaluator reads the Parakeet transcript of the window: a sample took the turn when its words span at least 1 s or number more than 3, and its latency is the first word's start minus the annotated end of the user's turn, clamped at 0. Pause handling consults the whole window, not only the annotated pauses.
+- **Missing values.** Empty interval sets and missing labels are null, never zero latency or 0%. Counts keep every selected, eligible, invalid and unscored sample.
+- **Limits.** Simulated playout is not acoustic latency, and the fixed window can cut long replies. One generation per sample does not estimate generation variance. Prosody and MOS are not covered.
+
+### Verification
+
+The unit tests cover export, missing samples, valid silence, timing, ASR deduplication, bounded judging and resumption for v1.5, the v1.0 export, ASR, evaluation and judge ledger, and the runbook's selection, gates, phase orchestration and aggregation for both datasets. With the pinned checkout they also run the official formulas on synthetic fixtures, without a GPU or API. Run them from the sglang-omni venv:
+
+```bash
+FDB_REFERENCE_SOURCE="$FDB_SOURCE" python -m pytest -q \
+    tests/unit_test/benchmarks/test_duplex_reference*.py tests/unit_test/benchmarks/test_fdb*.py
+```
+
+Export is deterministic: re-exporting a recording reproduces every eligible WAV byte for byte, and re-summarizing saved transcripts and intervals reproduces the same summaries, including coverage and bootstrap intervals.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `ERROR: the model server did not become ready` (or the judge server) | The message ends with the last lines of the server log; the full log is `repeat-N/logs/model-server.log` or `repeat-N/logs/judge-server.log` |
+| `ERROR: something already serves ...` | Another server holds the port, often a leftover from an interrupted run or a second job on the same GPU. Stop it, or give this job a different `CUDA_VISIBLE_DEVICES` / `SERVER_PORT` / `JUDGE_PORT` |
+| `ERROR: .../repeat-N already holds a recording` | That repeat was already generated; use the next `--repeat` or delete the directory |
+| `ERROR: .../sample-ids.txt selects different pairs` or `.../v10/sample-ids.txt selects different v1.0 samples` | An earlier repeat of this run used another selection; pass the same selection options, or use a new `--run-name` |
+| `ERROR: .../repeat-N is a v1.5-only repeat` | The earlier repeats of this run left v1.0 out; continue the run with the option change the message names, or use a new `--run-name` |
+| `ERROR: both datasets are left out` | Both per-subset counts are 0; give at least one dataset a count |
+| `ERROR: .../dataset/v1.0 lacks the v1.0 subset(s) ...` | The workspace has no (or a partial) v1.0 dataset; rerun `setup`, which adds it to an existing workspace |
+| `ERROR: .../reference-manifest.json is missing` or `.../v10/reference/manifest.json is missing` | `generate` recorded that dataset but did not finish its export; delete that `repeat-N` and generate it again |
+| A shard log reports `fail` or `error` sessions | They stay in the denominator. Read `repeat-N/logs/record-shard-*.log` (v1.5) or `repeat-N/v10/logs/record-shard-*.log` (v1.0). If most sessions fail, fix the server and redo the repeat |
+| HTTP 503 in record logs | `--num-shards` is larger than `max_sessions` in `SERVER_CONFIG` |
+| `--device cuda needs exactly one visible GPU` | `CUDA_VISIBLE_DEVICES` (or `GPU`, when the former is unset) must be a single index |
+| `ERROR: set CUDA_VISIBLE_DEVICES to exactly one GPU index` | A concurrent job must see one card. `export CUDA_VISIBLE_DEVICES=0` in one terminal and `=1` in the other |
+| `ERROR: GPU and CUDA_VISIBLE_DEVICES disagree` | Unset `GPU`, or set it to the same index as `CUDA_VISIBLE_DEVICES` |
+| `asr` or `judge` prints `WARNING: a v1.5 phase reported failures` | Rerun the command the warning prints; it is the same step with `--retry-failed` |
+| `WARNING: the v1.0 ASR failed` | `repeat-N/v10/reference/logs/asr.log` holds the official script's output; the traceback is printed on the terminal. Rerunning `asr` transcribes every v1.0 sample again |
+| `WARNING: the v1.0 evaluation failed for ...` | Read `repeat-N/v10/reference/logs/evaluate-<subset>.log`; the traceback is at its end. A `ZeroDivisionError` in `candor_turn_taking` or `synthetic_user_interruption` means no selected sample took the turn; widen the selection (`--v10-per-subset 3` or more) in a new run. Other failures: fix the cause and rerun `judge`, which evaluates the missing subsets again |
+| `judge request ... got no parsable rating in 3 attempts` | The v1.0 relevance judge returned no rating for one interruption; the ledger under `v10/reference/judge/` shows each reply's `content`. The official parser needs `Analysis: <text>`, a line break, then `I would rate the AI's response as <digit>`. The three attempts carry the same seed, so a self-hosted judge answers identically each time and a rerun repeats the failure |
+| `custom judge identity changed; use a new --out` | The judge config changed since this repeat was judged (for example, a different SGLang version). Delete `repeat-N/judge-qwen` and rerun `judge` for that repeat |
+| `Control check failed: this judge configuration is not accepted.` | The judge missed a control case; the printed lines show which. Do not grade with this configuration. Check that the judge server runs the pinned Qwen3.8-27B revision |
+| `... changed since this directory was created; use a new --out` | The semantic judge settings, prompt or inputs changed since this repeat was graded. Delete `repeat-N/semantic-qwen` and rerun `judge` for that repeat |
+| `model_mismatch` with `JUDGE=gpt` | The endpoint returned a model name other than `gpt-4o-2024-08-06`; use an endpoint that serves exactly that model |
+| `model-server.log` ends with `No module named 'onnx'` (or `einops`) | Rerun `setup`; it installs the `minicpm-o` extra into the active venv |
+| `ModuleNotFoundError` in `asr` | Rerun `setup`; it reinstalls the scoring venv packages |
+| `setup` stops with `torchcodec cannot load its FFmpeg libraries` | Install FFmpeg shared libraries (version 4 to 8) on the host and rerun `setup` |
+
+## Concurrent runs
+
+Open two terminals. Paste one block into each. Start both immediately; neither waits for the other. Each terminal keeps the sglang-omni venv active (`which python` prints that interpreter) and runs every line itself. Do not set `SERVER_PORT` or `JUDGE_PORT`. The model port is `8097 + 10×GPU` and the judge port is `30000 + 10×GPU`. The judge NCCL port is the judge port + 1. The judge config is `$FDB_WORK/judge/port-<judge port>/`. Compile caches are under `$FDB_WORK/cache/gpu-<index>/`.
+
+The first line from `generate` must be exactly the `Job GPU ...` line written under that terminal. GPU 0 is model port 8097, judge port 30000, judge NCCL port 30001. GPU 1 is model port 8107, judge port 30010, judge NCCL port 30011. A shell startup helper may have exported `CUDA_VISIBLE_DEVICES` already; the `export` in the block replaces it. `unset GPU` is required when that variable is set to a different index.
+
+Terminal 1:
+
+```bash
+cd <path/to/sglang-omni>
+export FDB_WORK="${FDB_WORK:-$HOME/fdb}"
+unset GPU SERVER_PORT JUDGE_PORT
+export CUDA_VISIBLE_DEVICES=0
+python -m benchmarks.duplex.fdb generate --run-name minicpmo-30-t1 --repeat 1 --v15-per-subset 30 --v10-per-subset 30
+python -m benchmarks.duplex.fdb asr --run-name minicpmo-30-t1 --repeat 1
+python -m benchmarks.duplex.fdb judge --run-name minicpmo-30-t1 --repeat 1
+python -m benchmarks.duplex.fdb aggregate --run-name minicpmo-30-t1
+```
+
+`generate` prints `Job GPU 0: model port 8097, judge port 30000 (nccl 30001), judge config /data/chenyang/fdb/judge/port-30000` when `FDB_WORK` is `/data/chenyang/fdb`. `aggregate` writes `$FDB_WORK/runs/minicpmo-30-t1/RESULTS.md`.
+
+Terminal 2:
+
+```bash
+cd <path/to/sglang-omni>
+export FDB_WORK="${FDB_WORK:-$HOME/fdb}"
+unset GPU SERVER_PORT JUDGE_PORT
+export CUDA_VISIBLE_DEVICES=1
+python -m benchmarks.duplex.fdb generate --run-name minicpmo-30-t2 --repeat 1 --v15-per-subset 30 --v10-per-subset 30
+python -m benchmarks.duplex.fdb asr --run-name minicpmo-30-t2 --repeat 1
+python -m benchmarks.duplex.fdb judge --run-name minicpmo-30-t2 --repeat 1
+python -m benchmarks.duplex.fdb aggregate --run-name minicpmo-30-t2
+```
+
+`generate` prints `Job GPU 1: model port 8107, judge port 30010 (nccl 30011), judge config /data/chenyang/fdb/judge/port-30010` when `FDB_WORK` is `/data/chenyang/fdb`. `aggregate` writes `$FDB_WORK/runs/minicpmo-30-t2/RESULTS.md`.
+
+A third terminal is the same block with `export CUDA_VISIBLE_DEVICES=2`, `--run-name minicpmo-30-t3`, model port 8117 and judge port 30020. Do not point two terminals at the same `--run-name`.

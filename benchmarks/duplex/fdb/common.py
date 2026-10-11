@@ -300,9 +300,22 @@ def step_command(step: str, settings: Settings, repeat: int | None = None) -> st
     """The CLI line for a step of this run, for hints in messages."""
     repeat_argument = "" if repeat is None else f" --repeat {repeat}"
     return (
-        f"python -m benchmarks.duplex.fdb_v15 {step} "
+        f"python -m benchmarks.duplex.fdb {step} "
         f"--run-name {settings.run_name}{repeat_argument}"
     )
+
+
+def selected_v15(settings: Settings, repeat: int) -> bool:
+    """Whether a generated repeat selected v1.5 pairs; sample-ids.txt is written
+    by generate before anything is recorded, so a missing file means the repeat
+    was never generated."""
+    ids_file = settings.repeat_dir(repeat) / "sample-ids.txt"
+    if not ids_file.is_file():
+        raise SystemExit(
+            f"ERROR: run `{step_command('generate', settings, repeat)}` first."
+        )
+    else:
+        return ids_file.read_text().strip() != ""
 
 
 def require_v10_export(settings: Settings, repeat: int) -> Path | None:

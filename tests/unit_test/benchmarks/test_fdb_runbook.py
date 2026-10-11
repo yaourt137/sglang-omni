@@ -15,19 +15,19 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.duplex.fdb_v15 import asr as asr_module
-from benchmarks.duplex.fdb_v15 import generate as generate_module
-from benchmarks.duplex.fdb_v15 import judge as judge_module
-from benchmarks.duplex.fdb_v15.__main__ import build_parser, sample_selection
-from benchmarks.duplex.fdb_v15.aggregate import render
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb import asr as asr_module
+from benchmarks.duplex.fdb import generate as generate_module
+from benchmarks.duplex.fdb import judge as judge_module
+from benchmarks.duplex.fdb.__main__ import build_parser, sample_selection
+from benchmarks.duplex.fdb.aggregate import render
+from benchmarks.duplex.fdb.common import (
     PARAKEET_SHA256,
     RECORD_PROFILE,
     Settings,
     load_settings,
     require_v10_export,
 )
-from benchmarks.duplex.fdb_v15.selection import (
+from benchmarks.duplex.fdb.selection import (
     SampleSelection,
     check_matches_other_repeats,
     describe,
@@ -141,55 +141,62 @@ def parse_selection(*arguments: str) -> tuple[SampleSelection, SampleSelection]:
     return sample_selection(parser, parser.parse_args(["generate", *arguments]))
 
 
-def test_v10_count_follows_per_subset_unless_set_or_pairs_are_explicit(
-    tmp_path: Path,
-) -> None:
-    v15, v10 = parse_selection("--per-subset", "3")
-    assert (v15.per_subset, v10.per_subset, v10.subset_counts) == (3, 3, {})
-    assert v10.sample_ids is None
-    _, v10 = parse_selection("--per-subset", "all")
-    assert v10.per_subset is None
-    _, v10 = parse_selection("--sample-id", "user_interruption/1")
-    assert v10.per_subset == 0
-    _, v10 = parse_selection(
-        "--sample-id", "user_interruption/1", "--v10-per-subset", "4"
-    )
-    assert v10.per_subset == 4
-    _, v10 = parse_selection("--v10-per-subset", "0")
-    assert v10.per_subset == 0
+def test_each_dataset_has_its_own_selection_options(tmp_path: Path) -> None:
+    v15, v10 = parse_selection()
+    assert (v15.per_subset, v10.per_subset) == (12, 12)
+    assert v15.sample_ids is None and v10.sample_ids is None
+    v15, v10 = parse_selection("--v15-per-subset", "3")
+    assert (v15.per_subset, v10.per_subset, v10.subset_counts) == (3, 12, {})
+    v15, v10 = parse_selection("--v15-per-subset", "all", "--v10-per-subset", "0")
+    assert (v15.per_subset, v10.per_subset) == (None, 0)
+    v15, v10 = parse_selection("--v15-sample-id", "user_interruption/1")
+    assert (v15.sample_ids, v10.per_subset) == (["user_interruption/1"], 12)
     v15, v10 = parse_selection(
+        "--v15-subset-count",
+        "user_interruption=20",
         "--v10-subset-count",
         "icc_backchannel=all",
         "--v10-subset-count",
         "candor_pause_handling=0",
     )
-    assert v15.subset_counts == {}
+    assert v15.subset_counts == {"user_interruption": 20}
     assert v10.subset_counts == {"icc_backchannel": None, "candor_pause_handling": 0}
     _, v10 = parse_selection("--v10-sample-id", "icc_backchannel/3")
     assert v10.sample_ids == ["icc_backchannel/3"]
     ids_file = tmp_path / "v10-ids.txt"
     ids_file.write_text(ids_text(V10_IDS))
-    _, v10 = parse_selection("--v10-sample-ids-file", str(ids_file))
-    assert v10.sample_ids == V10_IDS
-    with pytest.raises(SystemExit):
-        parse_selection("--v10-subset-count", "user_interruption=3")
-    with pytest.raises(SystemExit):
-        parse_selection("--v10-sample-id", "icc_backchannel/3", "--v10-per-subset", "1")
-    with pytest.raises(SystemExit):
-        parse_selection(
+    v15, v10 = parse_selection("--v10-sample-ids-file", str(ids_file))
+    assert (v15.per_subset, v10.sample_ids) == (12, V10_IDS)
+    # note (luojiaxuan): a subset name belongs to one dataset, and explicit IDs
+    # exclude the count options of the same dataset.
+    for arguments in (
+        ("--v10-subset-count", "user_interruption=3"),
+        ("--v15-subset-count", "icc_backchannel=3"),
+        ("--v10-sample-id", "icc_backchannel/3", "--v10-per-subset", "1"),
+        (
             "--v10-sample-id",
             "icc_backchannel/3",
             "--v10-subset-count",
             "icc_backchannel=2",
-        )
+        ),
+        ("--v15-sample-id", "user_interruption/1", "--v15-per-subset", "1"),
+        (
+            "--v15-sample-id",
+            "user_interruption/1",
+            "--v15-subset-count",
+            "user_interruption=2",
+        ),
+    ):
+        with pytest.raises(SystemExit):
+            parse_selection(*arguments)
 
 
 def test_leave_out_hint_names_an_option_change_the_parser_accepts() -> None:
     # note (luojiaxuan): the count-mode hint must parse next to a count selection;
     # the other two modes tell the user which option to drop.
-    _, v10 = parse_selection("--per-subset", "12")
+    _, v10 = parse_selection("--v15-per-subset", "12")
     assert leave_out_hint(v10) == COUNT_HINT
-    _, v10 = parse_selection("--per-subset", "12", *COUNT_HINT.split()[1:])
+    _, v10 = parse_selection("--v15-per-subset", "12", *COUNT_HINT.split()[1:])
     assert v10.per_subset == 0
     _, v10 = parse_selection(
         "--v10-per-subset", "0", "--v10-subset-count", "icc_backchannel=all"
@@ -343,6 +350,43 @@ def test_generate_without_v10_writes_no_v10_directory_and_fails_before_the_serve
     assert not (other.repeat_dir(1) / "recording").exists()
 
 
+def test_generate_with_v15_left_out_records_only_v10(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_datasets(settings)
+    servers, recordings, exports = stub_generate_phases(monkeypatch)
+    v10_ids = [f"{subset}/1" for subset in V10_SUBSETS]
+    repeat_dir = settings.repeat_dir(1)
+    generate_module.generate(
+        settings, 1, SampleSelection(per_subset=0), SampleSelection(per_subset=1), 1
+    )
+    assert (repeat_dir / "sample-ids.txt").read_text() == ""
+    assert not (repeat_dir / "recording").exists()
+    assert recordings == [
+        (
+            generate_module.v10_record_command(settings),
+            repeat_dir / "v10",
+            v10_ids,
+            1,
+            1,
+        )
+    ]
+    assert len(servers) == 1 and len(exports) == 1
+    # note (luojiaxuan): the v1.0 recording alone marks the repeat as generated.
+    with pytest.raises(SystemExit, match="already holds a recording"):
+        generate_module.generate(
+            settings, 1, SampleSelection(per_subset=0), SampleSelection(per_subset=1), 1
+        )
+    with pytest.raises(SystemExit, match="both datasets are left out"):
+        generate_module.generate(
+            load_settings("empty"),
+            1,
+            SampleSelection(per_subset=0),
+            SampleSelection(per_subset=0),
+            1,
+        )
+
+
 def test_generate_discards_the_v10_marker_of_an_attempt_that_never_recorded(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -457,14 +501,24 @@ def test_v10_asr_composes_reference_asr_once_per_export(
     assert len(calls) == 1
 
 
-def stage_scored_repeat(settings: Settings, v10_ids: list[str] | None) -> Path:
-    """A repeat after generate and asr: v1.5 markers, and the v1.0 export when selected."""
+def stage_scored_repeat(
+    settings: Settings, v10_ids: list[str] | None, v15_ids: list[str] = V15_IDS
+) -> Path:
+    """A repeat after generate and asr: the v1.5 markers when v1.5 was selected,
+    and the v1.0 export when v1.0 was."""
     repeat_dir = settings.repeat_dir(1)
-    (repeat_dir / "reference-audio").mkdir(parents=True)
-    (repeat_dir / "reference-audio" / "reference-manifest.json").write_text("{}")
-    receipt = repeat_dir / "scores" / "engines" / "minicpmo" / "manifest-receipt.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text("{}")
+    repeat_dir.mkdir(parents=True)
+    (repeat_dir / "sample-ids.txt").write_text(ids_text(v15_ids))
+    if v15_ids:
+        (repeat_dir / "reference-audio").mkdir()
+        (repeat_dir / "reference-audio" / "reference-manifest.json").write_text("{}")
+        receipt = (
+            repeat_dir / "scores" / "engines" / "minicpmo" / "manifest-receipt.json"
+        )
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text("{}")
+    else:
+        pass
     settings.judge_revision_file.parent.mkdir(parents=True, exist_ok=True)
     settings.judge_revision_file.write_text("0" * 40 + "\n")
     if v10_ids is not None:
@@ -586,6 +640,29 @@ def test_judge_runs_no_v10_phase_for_a_v15_only_repeat(
     judge_module.judge(settings, 1, False)
     assert calls
     assert not any(V10_CLI in command for command in calls)
+
+
+def test_asr_and_judge_run_only_the_v10_phases_for_a_v10_only_repeat(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repeat_dir = stage_scored_repeat(settings, V10_IDS, v15_ids=[])
+    asr_calls = []
+    monkeypatch.setattr(
+        asr_module,
+        "run_command",
+        lambda command, **_: asr_calls.append(command) or True,
+    )
+    asr_module.asr(settings, 1, False)
+    assert [command[3] for command in asr_calls] == ["reference-asr"]
+    (repeat_dir / "v10" / "reference" / "asr.json").write_text("{}")
+    judge_calls = stub_judge_phases(monkeypatch, failing_subset=None)
+    judge_module.judge(settings, 1, False)
+    assert [command[3] for command in judge_calls] == ["reference-evaluate"] * 2
+    assert not (repeat_dir / "report.txt").exists()
+    # note (luojiaxuan): a repeat that was never generated has no sample-ids.txt.
+    other = load_settings("other")
+    with pytest.raises(SystemExit, match="generate --run-name other"):
+        asr_module.asr(other, 1, False)
 
 
 def test_asr_and_judge_refuse_a_selected_v10_without_its_artifacts(
@@ -792,6 +869,16 @@ def test_results_append_a_separate_v10_table_only_when_a_run_has_v10(
         "| candor_pause_handling | 2 | 0 | 0 | n/a | n/a | n/a | n/a | n/a | n/a |"
         in lines
     )
+
+
+def test_results_of_a_v10_only_run_have_no_v15_section(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    (run_root / "repeat-1").mkdir(parents=True)
+    write_v10_tree(run_root / "repeat-1", takeover=1.0, latency_s=2.0, retries=0)
+    results = render(run_root, "minicpmo", "qwen")
+    assert results.startswith("# FDB results: run\n")
+    assert "v1.5" not in results
+    assert "## FDB v1.0 results" in results
 
 
 def test_results_name_the_repeats_that_carry_v10(tmp_path: Path) -> None:

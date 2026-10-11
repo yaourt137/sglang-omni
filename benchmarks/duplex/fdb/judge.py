@@ -9,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     CUSTOM_JUDGE_API_KEY_ENV,
     ENGINE_LABEL,
     GPT_JUDGE_MODEL,
@@ -22,10 +22,11 @@ from benchmarks.duplex.fdb_v15.common import (
     reference_command,
     require_v10_export,
     run_command,
+    selected_v15,
     step_command,
     v10_command,
 )
-from benchmarks.duplex.fdb_v15.servers import judge_server
+from benchmarks.duplex.fdb.servers import judge_server
 from benchmarks.duplex.v10_dataset import SUBSETS as V10_SUBSETS
 
 UNAUTHENTICATED_API_KEY = "EMPTY"
@@ -81,6 +82,7 @@ def judge_with_qwen(
     repeat_dir: Path,
     tree_arguments: list[str],
     retry_arguments: list[str],
+    has_v15: bool,
     v10_tree: Path | None,
     v10_subsets: list[str],
 ) -> tuple[bool, list[str]]:
@@ -99,57 +101,62 @@ def judge_with_qwen(
         "--out",
         str(qwen_scores),
     ]
+    is_v15_ok = True
     with judge_server(settings, repeat_dir / "logs" / "judge-server.log"):
-        log(f"== Qwen judge -> {qwen_scores}")
-        is_judge_ok = run_command(
-            reference_command(
-                settings,
-                "custom-judge",
-                *source_arguments,
-                "--judge-config",
-                judge_config,
-                "--base-url",
-                settings.judge_url,
-                *retry_arguments,
-            ),
-            extra_env=api_key_env,
-        )
-        is_summary_ok = run_command(
-            reference_command(
-                settings,
-                "custom-summarize",
-                *source_arguments,
-                "--judge-config",
-                judge_config,
+        if has_v15:
+            log(f"== v1.5 Qwen judge -> {qwen_scores}")
+            is_judge_ok = run_command(
+                reference_command(
+                    settings,
+                    "custom-judge",
+                    *source_arguments,
+                    "--judge-config",
+                    judge_config,
+                    "--base-url",
+                    settings.judge_url,
+                    *retry_arguments,
+                ),
+                extra_env=api_key_env,
             )
-        )
-        log(f"== Semantic A/F/U judge -> {semantic_scores}")
-        is_semantic_ok = run_command(
-            [
-                str(settings.scoring_python),
-                "-m",
-                "benchmarks.duplex.semantic_judge",
-                "--reference-audio",
-                str(repeat_dir / "reference-audio"),
-                "--scores",
-                str(scores),
-                "--engine",
-                ENGINE_LABEL,
-                "--dataset-root",
-                str(settings.dataset),
-                "--out",
-                str(semantic_scores),
-                "--base-url",
-                settings.judge_url,
-                "--model-id",
-                JUDGE_MODEL_ID,
-                "--model-revision",
-                settings.judge_revision_file.read_text().strip(),
-                "--served-model",
-                JUDGE_SERVED_MODEL,
-            ],
-            extra_env=api_key_env,
-        )
+            is_summary_ok = run_command(
+                reference_command(
+                    settings,
+                    "custom-summarize",
+                    *source_arguments,
+                    "--judge-config",
+                    judge_config,
+                )
+            )
+            log(f"== v1.5 semantic A/F/U judge -> {semantic_scores}")
+            is_semantic_ok = run_command(
+                [
+                    str(settings.scoring_python),
+                    "-m",
+                    "benchmarks.duplex.semantic_judge",
+                    "--reference-audio",
+                    str(repeat_dir / "reference-audio"),
+                    "--scores",
+                    str(scores),
+                    "--engine",
+                    ENGINE_LABEL,
+                    "--dataset-root",
+                    str(settings.dataset),
+                    "--out",
+                    str(semantic_scores),
+                    "--base-url",
+                    settings.judge_url,
+                    "--model-id",
+                    JUDGE_MODEL_ID,
+                    "--model-revision",
+                    settings.judge_revision_file.read_text().strip(),
+                    "--served-model",
+                    JUDGE_SERVED_MODEL,
+                ],
+                extra_env=api_key_env,
+            )
+            is_v15_ok = is_judge_ok and is_summary_ok and is_semantic_ok
+        else:
+            pass
         failed_v10 = evaluate_v10(
             settings,
             v10_tree,
@@ -164,7 +171,7 @@ def judge_with_qwen(
             ],
             extra_env=api_key_env,
         )
-    return is_judge_ok and is_summary_ok and is_semantic_ok, failed_v10
+    return is_v15_ok, failed_v10
 
 
 def judge_with_gpt(
@@ -172,6 +179,7 @@ def judge_with_gpt(
     repeat_dir: Path,
     tree_arguments: list[str],
     retry_arguments: list[str],
+    has_v15: bool,
     v10_tree: Path | None,
     v10_subsets: list[str],
 ) -> tuple[bool, list[str]]:
@@ -179,30 +187,35 @@ def judge_with_gpt(
         raise SystemExit("ERROR: export OPENAI_API_KEY before running the GPT judge.")
     else:
         pass
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    base_url_arguments = ["--base-url", base_url] if base_url else []
-    scores_arguments = [*tree_arguments, "--out", str(repeat_dir / "scores")]
-    log(f"== GPT judge ({GPT_JUDGE_MODEL}) -> {repeat_dir / 'scores'}")
-    is_prepare_ok = run_command(
-        reference_command(settings, "prepare-judge", *scores_arguments)
-    )
-    is_judge_ok = run_command(
-        reference_command(
-            settings,
-            "judge",
-            *scores_arguments,
-            "--judge",
-            GPT_JUDGE_MODEL,
-            "--api-key-env",
-            "OPENAI_API_KEY",
-            *base_url_arguments,
-            *retry_arguments,
+    is_v15_ok = True
+    if has_v15:
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        base_url_arguments = ["--base-url", base_url] if base_url else []
+        scores_arguments = [*tree_arguments, "--out", str(repeat_dir / "scores")]
+        log(f"== v1.5 GPT judge ({GPT_JUDGE_MODEL}) -> {repeat_dir / 'scores'}")
+        is_prepare_ok = run_command(
+            reference_command(settings, "prepare-judge", *scores_arguments)
         )
-    )
+        is_judge_ok = run_command(
+            reference_command(
+                settings,
+                "judge",
+                *scores_arguments,
+                "--judge",
+                GPT_JUDGE_MODEL,
+                "--api-key-env",
+                "OPENAI_API_KEY",
+                *base_url_arguments,
+                *retry_arguments,
+            )
+        )
+        is_v15_ok = is_prepare_ok and is_judge_ok
+    else:
+        pass
     failed_v10 = evaluate_v10(
         settings, v10_tree, v10_subsets, ["--api-key-env", "OPENAI_API_KEY"]
     )
-    return is_prepare_ok and is_judge_ok, failed_v10
+    return is_v15_ok, failed_v10
 
 
 def write_report(
@@ -241,9 +254,13 @@ def write_report(
 
 def judge(settings: Settings, repeat: int, retry_failed: bool) -> None:
     repeat_dir = settings.repeat_dir(repeat)
-    if not (
-        repeat_dir / "scores" / "engines" / ENGINE_LABEL / "manifest-receipt.json"
-    ).is_file():
+    has_v15 = selected_v15(settings, repeat)
+    if (
+        has_v15
+        and not (
+            repeat_dir / "scores" / "engines" / ENGINE_LABEL / "manifest-receipt.json"
+        ).is_file()
+    ):
         raise SystemExit(f"ERROR: run `{step_command('asr', settings, repeat)}` first.")
     else:
         pass
@@ -264,19 +281,23 @@ def judge(settings: Settings, repeat: int, retry_failed: bool) -> None:
         f"{ENGINE_LABEL}={repeat_dir / 'reference-audio'}",
     ]
     retry_arguments = ["--retry-failed"] if retry_failed else []
-    if settings.judge == "qwen":
-        is_judge_ok, failed_v10 = judge_with_qwen(
-            settings, repeat_dir, tree_arguments, retry_arguments, v10_tree, v10_subsets
-        )
-    else:
-        is_judge_ok, failed_v10 = judge_with_gpt(
-            settings, repeat_dir, tree_arguments, retry_arguments, v10_tree, v10_subsets
-        )
-    is_report_ok = write_report(settings, repeat_dir, tree_arguments)
+    judge_with = judge_with_qwen if settings.judge == "qwen" else judge_with_gpt
+    is_judge_ok, failed_v10 = judge_with(
+        settings,
+        repeat_dir,
+        tree_arguments,
+        retry_arguments,
+        has_v15,
+        v10_tree,
+        v10_subsets,
+    )
+    is_report_ok = (
+        write_report(settings, repeat_dir, tree_arguments) if has_v15 else True
+    )
     problems = []
     if not (is_judge_ok and is_report_ok):
         problems.append(
-            "WARNING: a phase reported failures. "
+            "WARNING: a v1.5 phase reported failures. "
             f"Rerun with: {step_command('judge', settings, repeat)} --retry-failed"
         )
     else:

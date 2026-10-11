@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Aggregate per-repeat FDB v1.5 summaries, and v1.0 summaries when a run has
-them, into mean and deviation tables."""
+"""Aggregate the per-repeat v1.5 and v1.0 summaries of a run into mean and
+deviation tables, one section per dataset the run selected."""
 
 from __future__ import annotations
 
 import statistics
 from pathlib import Path
 
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     ENGINE_LABEL,
     V10_DIR,
     JudgeName,
@@ -200,32 +200,63 @@ def format_cell(values: list[float | None], unit: str) -> str:
         return f"{mean:.{digits}f} ± {deviation:.{digits}f}{suffix}"
 
 
+def coverage_note(
+    label: str, repeat_dirs: list[Path], per_repeat: list[RepeatMetrics]
+) -> str:
+    """Which repeats a table draws on, when some repeats lack that dataset."""
+    carrying = [path.name for path, metrics in zip(repeat_dirs, per_repeat) if metrics]
+    if len(carrying) == len(repeat_dirs):
+        return ""
+    else:
+        return (
+            f" {label} cells come from {', '.join(carrying)} only; the other "
+            f"repeats have no {label} results."
+        )
+
+
 def render(run_root: Path, engine: str, judge: JudgeName) -> str:
     repeat_dirs = sorted(
         path
         for path in run_root.glob("repeat-*")
         if (path / "scores" / "summary.json").is_file()
+        or (path / V10_DIR / "reference" / "manifest.json").is_file()
     )
     if not repeat_dirs:
-        raise SystemExit(f"no repeat-*/scores/summary.json under {run_root}")
+        raise SystemExit(f"no finished repeat-* under {run_root}")
     else:
         pass
-    per_repeat = [repeat_metrics(path, engine, judge) for path in repeat_dirs]
     lines = [
-        f"# FDB v1.5 results: {run_root.name}",
+        f"# FDB results: {run_root.name}",
         "",
         f"Repeats: {', '.join(path.name for path in repeat_dirs)}. "
         f"Judge: {judge}. Cells are mean ± sample standard deviation across repeats.",
-        "Latencies are pooled whole-file overlap intervals; "
-        "label shares are over valid judge labels.",
-        "",
-        *render_table(per_repeat, COLUMNS),
     ]
+    per_repeat = [
+        (
+            repeat_metrics(path, engine, judge)
+            if (path / "scores" / "summary.json").is_file()
+            else {}
+        )
+        for path in repeat_dirs
+    ]
+    if any(per_repeat):
+        lines += [
+            "",
+            "## FDB v1.5 results",
+            "",
+            "Latencies are pooled whole-file overlap intervals; "
+            "label shares are over valid judge labels."
+            + coverage_note("v1.5", repeat_dirs, per_repeat),
+            "",
+            *render_table(per_repeat, COLUMNS),
+        ]
+    else:
+        pass
     per_repeat_semantic = [semantic_metrics(path) for path in repeat_dirs]
     if any(per_repeat_semantic):
         lines += [
             "",
-            "## Semantic A/F/U judge",
+            "## v1.5 semantic A/F/U judge",
             "",
             "quality = A/(A+F); coverage = (A+F)/N. "
             "joint fails if any axis fails and accepts only if all three accept.",
@@ -239,15 +270,6 @@ def render(run_root: Path, engine: str, judge: JudgeName) -> str:
         relevance_judge = (
             "the local Qwen judge, non-official" if judge == "qwen" else "GPT"
         )
-        v10_repeats = [
-            path.name for path, metrics in zip(repeat_dirs, per_repeat_v10) if metrics
-        ]
-        coverage = (
-            ""
-            if len(v10_repeats) == len(repeat_dirs)
-            else f" v1.0 cells come from {', '.join(v10_repeats)} only; "
-            "the other repeats have no v1.0 export."
-        )
         lines += [
             "",
             "## FDB v1.0 results",
@@ -259,7 +281,8 @@ def render(run_root: Path, engine: str, judge: JudgeName) -> str:
             "should be low on pause handling and backchannel, and high on turn "
             "taking and interruption. Relevance is a 0-5 rating of the "
             f"interruptions the model took over, by {relevance_judge}; a nonzero "
-            "Judge retries count inflates that subset's takeover rate." + coverage,
+            "Judge retries count inflates that subset's takeover rate."
+            + coverage_note("v1.0", repeat_dirs, per_repeat_v10),
             "",
             *render_table(per_repeat_v10, V10_COLUMNS, V10_SUBSETS),
         ]

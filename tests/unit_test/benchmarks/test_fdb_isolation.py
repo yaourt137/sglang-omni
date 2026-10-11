@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 from typer.testing import CliRunner
 
-from benchmarks.duplex.fdb_v15.common import (
+from benchmarks.duplex.fdb.common import (
     DEFAULT_JUDGE_PORT,
     DEFAULT_SERVER_PORT,
     JOB_PORT_STRIDE,

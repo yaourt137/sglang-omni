@@ -7,7 +7,7 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from benchmarks.duplex.fdb_v15.common import V10_DIR
+from benchmarks.duplex.fdb.common import V10_DIR
 from benchmarks.duplex.v10_dataset import SUBSETS as V10_SUBSETS
 from benchmarks.duplex.v15_dataset import SUBSETS, select_sample_ids
 
@@ -64,16 +64,12 @@ def first_per_subset(
 
 
 def select_samples(dataset: Path, selection: SampleSelection) -> list[str]:
-    """Sample IDs in dataset order; each category takes its first N samples."""
+    """v1.5 pair IDs in dataset order; each category takes its first N pairs.
+    Empty when every count is 0, which leaves v1.5 out of the run."""
     if selection.sample_ids is not None:
         return select_sample_ids(dataset, SUBSETS, selection.sample_ids, None)
     else:
-        pass
-    sample_ids = first_per_subset(dataset, selection, SUBSETS)
-    if not sample_ids:
-        raise SystemExit("ERROR: the selection is empty.")
-    else:
-        return sample_ids
+        return first_per_subset(dataset, selection, SUBSETS)
 
 
 def leave_out_hint(selection: SampleSelection) -> str:
@@ -87,6 +83,13 @@ def leave_out_hint(selection: SampleSelection) -> str:
         return "pass --v10-per-subset 0"
 
 
+def both_left_out_error() -> SystemExit:
+    return SystemExit(
+        "ERROR: both datasets are left out; give --v15-per-subset or "
+        "--v10-per-subset a nonzero count."
+    )
+
+
 def require_v10_subsets(dataset: Path, subsets: tuple[str, ...], hint: str) -> None:
     """Every v1.0 subset a selection reads must be staged; a partial setup
     would otherwise narrow the run without a word."""
@@ -94,7 +97,7 @@ def require_v10_subsets(dataset: Path, subsets: tuple[str, ...], hint: str) -> N
     if missing:
         raise SystemExit(
             f"ERROR: {dataset} lacks the v1.0 subset(s) {', '.join(missing)}. "
-            "Run `python -m benchmarks.duplex.fdb_v15 setup` (it adds the v1.0 "
+            "Run `python -m benchmarks.duplex.fdb setup` (it adds the v1.0 "
             f"dataset to an existing workspace), or {hint}."
         )
     else:

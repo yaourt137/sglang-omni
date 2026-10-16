@@ -37,10 +37,8 @@ from sglang_omni.models.fishaudio_drama3.hf_config import FishOmniConfig
 from sglang_omni.models.fishaudio_drama3.request_builders import Drama3RequestData
 from sglang_omni.models.fishaudio_drama3.speech_request import Drama3SpeechPreprocessor
 from sglang_omni.models.fishaudio_drama3.stream_windows import stream_window_lengths
-from sglang_omni.models.fishaudio_drama3.vocoder import (
-    Drama3VocoderScheduler,
-    WindowGraphDecoder,
-)
+from sglang_omni.models.fishaudio_drama3.vocoder import Drama3VocoderScheduler
+from sglang_omni.models.fishaudio_drama3.vocoder_cuda_graph import WindowGraphDecoder
 from sglang_omni.models.fishaudio_s2_pro.stages import (
     FishReferenceEncodeHook,
     load_codec,
@@ -288,6 +286,7 @@ def create_vocoder_executor(
     if window_cuda_graphs:
         decode_window: WindowDecoder = WindowGraphDecoder(
             decode,
+            max_batch_size=max_batch_size,
             num_codebooks=num_codebooks,
             frame_length=int(codec.frame_length),
             device=torch_device,
@@ -310,6 +309,10 @@ def create_vocoder_executor(
             total_gpu_memory_fraction=total_gpu_memory_fraction,
             max_new_tokens=max_new_tokens,
         )
+    if isinstance(decode_window, WindowGraphDecoder):
+        decode_window.max_padded_frames_per_decode = max_padded_frames_per_decode
+    else:
+        pass
     return Drama3VocoderScheduler(
         codec,
         device=resolved_device,

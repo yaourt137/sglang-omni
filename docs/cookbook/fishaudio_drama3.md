@@ -261,14 +261,12 @@ With the vocoder on the engine's GPU, at 256 streams the vocoder is fully loaded
 
 ### Streaming Vocoder Batches
 
-With `--vocoder.factory.window_cuda_graphs false`, the vocoder coalesces
-already-queued chunks from distinct requests without waiting for a batch.
-Ready windows of the same length decode together, up to
+The vocoder coalesces already-queued chunks from distinct requests without waiting
+for a batch. Ready windows of the same length decode together, up to
 `--vocoder.factory.max_batch_size` (8 by default) and the startup frame budget.
 Each request keeps its own window schedule, overlap and crossfade state. Tail
 windows flush immediately when that request completes.
 `--vocoder.factory.max_batch_wait_ms` applies only to non-streaming requests.
-The default singleton CUDA graphs retain per-request decoding.
 
 ### Non-Streaming Requests
 
@@ -292,7 +290,7 @@ The limit does not count the memory the vocoder process holds outside PyTorch's 
 | `prefill_decode_interval` 4 | After a prefill, new prefills wait for the next 4 scheduling rounds, so running streams keep decoding. | `--tts_engine.engine.prefill_decode_interval 0` schedules prefills without the wait |
 | Triton sampling | Samples each frame's main token and codes with Triton kernels instead of the PyTorch sampler, under the same top-k, top-p and repetition-aware rules. Using the same seed does not guarantee the same tokens as the PyTorch sampler. Rounding can keep or drop a candidate whose cumulative probability lies at top_p. | `--tts_engine.factory.triton_sampling false` |
 | Fused codebook tower layers, up to 16 rows | Runs the codebook tower layers of decode and first-frame steps of up to 16 rows as fused Triton kernels, eagerly or inside the CUDA graphs; larger steps and the tower's prefill keep the module path. The kernels add in a different order, so the tower's outputs can differ in the last bits and the sampled frames can differ. | `--tts_engine.factory.tower_fused_layers false` |
-| Vocoder window CUDA graphs | Replays the decode of each streaming window length at batch 1 as a CUDA graph; batches and longer windows decode eagerly. | `--vocoder.factory.window_cuda_graphs false` |
+| Vocoder window CUDA graphs | Replays streaming windows with every batch size up to max_batch_size. Only window lengths are padded; shapes exceeding the frame budget and longer windows decode eagerly. Graph memory is included in the startup budget. | `--vocoder.factory.window_cuda_graphs false` |
 | Vocoder fp16 decoding | Decodes frames into audio in fp16. | `--vocoder.factory.decode_dtype float32` |
 
 The same settings in a config file:

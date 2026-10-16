@@ -24,10 +24,8 @@ from sglang_omni.models.fishaudio_drama3.stream_windows import (
     frames_in_complete_windows,
     stream_window_lengths,
 )
-from sglang_omni.models.fishaudio_drama3.vocoder import (
-    Drama3VocoderScheduler,
-    WindowGraphDecoder,
-)
+from sglang_omni.models.fishaudio_drama3.vocoder import Drama3VocoderScheduler
+from sglang_omni.models.fishaudio_drama3.vocoder_cuda_graph import WindowGraphDecoder
 from sglang_omni.models.fishaudio_s2_pro.streaming_vocoder import WindowDecoder
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto.request import OmniRequest, StagePayload
@@ -337,16 +335,20 @@ def test_window_graphs_decode_every_window_length_like_eager() -> None:
         frame_length=SAMPLES_PER_FRAME,
         device=device,
         window_lengths=(10, 20, 32, 64, 96),
+        max_batch_size=8,
     )
-    codes = torch.randint(0, 100, (2, NUM_CODEBOOKS, 100), device=device)
+    codes = torch.randint(0, 100, (9, NUM_CODEBOOKS, 100), device=device)
 
     replay_results: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for frame_count in (96, 7, 10, 11, 64, 95, 97):
-        window = codes[:1, :, :frame_count]
-        replay_results.append((decoder(window), causal_decode(window)))
+    for request_count in (8, 1, 3, 2, 7, 5, 9):
+        for frame_count in (96, 7, 10, 11, 64, 95, 97):
+            window = codes[:request_count, :, :frame_count]
+            replay_results.append((decoder(window), causal_decode(window)))
     for decoded_audio, expected_audio in replay_results:
         assert torch.equal(decoded_audio, expected_audio)
-    assert torch.equal(decoder(codes[:, :, :20]), causal_decode(codes[:, :, :20]))
+    decoder.max_padded_frames_per_decode = 58
+    window = codes[:3, :, :19]
+    assert torch.equal(decoder(window), causal_decode(window))
 
 
 def test_the_final_result_counts_prompt_rows_and_audio_frames() -> None:
@@ -1012,3 +1014,34 @@ def test_abort_during_batched_decode_drops_audio_and_releases_request(
         ("healthy", "stream")
     ]
     assert "cancelled" not in vocoder.stream_states
+
+
+@pytest.mark.accelerator
+def test_batched_codec_graph_preserves_audio_across_replays() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    else:
+        pass
+    codec = tiny_codec().cuda()
+    codec.fold_weight_norm()
+    decode = ChannelsLastDecoder(codec, dtype=torch.float16)
+    graph = WindowGraphDecoder(
+        decode,
+        num_codebooks=NUM_CODEBOOKS,
+        frame_length=int(codec.frame_length),
+        device=torch.device("cuda"),
+        window_lengths=(10, 20, 32),
+        max_batch_size=3,
+    )
+    codes = torch.randint(0, 16, (4, NUM_CODEBOOKS, 40), device="cuda")
+    saved_audio: list[tuple[torch.Tensor, torch.Tensor]] = []
+    with torch.no_grad():
+        for request_count, frame_count in [(3, 32), (1, 7), (2, 20), (3, 11), (4, 40)]:
+            indices = codes[:request_count, :, :frame_count]
+            expected = torch.cat([decode(row[None]) for row in indices])
+            saved_audio.append((graph(indices), expected))
+    for actual, expected in saved_audio:
+        assert actual.shape == expected.shape
+        torch.testing.assert_close(
+            actual.float(), expected.float(), atol=2e-2, rtol=2e-2
+        )

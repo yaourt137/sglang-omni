@@ -25,6 +25,11 @@ MODES = ("serial_eager", "serial_graph", "batch_eager", "batch_graph")
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codec-path", default=Drama3VocoderFactoryArgs().codec_path)
+    parser.add_argument(
+        "--codes-path",
+        type=Path,
+        help="Tensor file with codec indices shaped [requests, codebooks, frames].",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument("--modes", nargs="+", choices=MODES, default=MODES)
@@ -58,6 +63,26 @@ def main() -> None:
         codec.quantizer.semantic_quantizer.n_codebooks
         + codec.quantizer.quantizer.n_codebooks
     )
+    reference_codes: torch.Tensor | None = None
+    if arguments.codes_path is not None:
+        reference_codes = torch.load(
+            arguments.codes_path, map_location="cuda", weights_only=True
+        )
+        if (
+            not isinstance(reference_codes, torch.Tensor)
+            or reference_codes.ndim != 3
+            or reference_codes.shape[0] < max(arguments.batch_sizes)
+            or reference_codes.shape[1] != codebook_count
+            or reference_codes.shape[2] < max(*window_lengths, 54)
+        ):
+            raise ValueError(
+                "codes must be a tensor with enough requests and frames "
+                "and the codec's codebook count"
+            )
+        else:
+            pass
+    else:
+        pass
     rows: list[dict[str, str | int | float]] = []
     graph_initializations: list[dict[str, str | int | float]] = []
     for mode in arguments.modes:
@@ -90,10 +115,13 @@ def main() -> None:
         )
         for batch_size in arguments.batch_sizes:
             for frame_count in (*window_lengths, 7, 54):
-                # note (yaourt): IDs below 16 are valid in every codec codebook.
-                indices = torch.randint(
-                    0, 16, (batch_size, codebook_count, frame_count), device="cuda"
-                )
+                if reference_codes is None:
+                    # note (yaourt): IDs below 16 are valid in every codec codebook.
+                    indices = torch.randint(
+                        0, 16, (batch_size, codebook_count, frame_count), device="cuda"
+                    )
+                else:
+                    indices = reference_codes[:batch_size, :, :frame_count].contiguous()
                 with torch.no_grad():
                     expected = torch.cat([decode(codes[None]) for codes in indices])
                     actual = (
@@ -149,6 +177,11 @@ def main() -> None:
                 "torch": torch.__version__,
                 "cuda": torch.version.cuda,
                 "codec_path": arguments.codec_path,
+                "codes_path": (
+                    str(arguments.codes_path)
+                    if arguments.codes_path is not None
+                    else None
+                ),
                 "iterations": arguments.iterations,
                 "warmup": arguments.warmup,
                 "seed": arguments.seed,

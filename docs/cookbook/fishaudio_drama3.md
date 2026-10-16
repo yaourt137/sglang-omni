@@ -268,6 +268,14 @@ Each request keeps its own window schedule, overlap and crossfade state. Tail
 windows flush immediately when that request completes.
 `--vocoder.factory.max_batch_wait_ms` applies only to non-streaming requests.
 
+Batched window graphs reserve more GPU memory than singleton graphs. The startup
+budget includes this reservation and still requires room for one non-streaming
+request at the configured token limit. On an A100 80GB with the int4 checkpoint,
+the default batch size of 8 and token limit of 2048 require
+`--vocoder.gpu_memory_fraction 0.12`; the default 0.10 share is too small. Keep the
+engine at its default 0.70 share in this configuration. Reducing
+`--vocoder.factory.max_batch_size` also reduces graph memory.
+
 ### Non-Streaming Requests
 
 The vocoder decodes a non-streaming request's audio in one piece after the engine finishes it, batching requests that
